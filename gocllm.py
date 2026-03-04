@@ -505,8 +505,15 @@ class RagClient:
             # 스펙 문서 기준 retrieval 명칭 + 운영 API에서 사용되던 구 버전 경로를 모두 시도
             "bm25": ["/retrieve-bm25", "/retrieve_bm25", "/bm25", "/search/bm25"],
             "knn": ["/retrieve-knn", "/retrieve_knn", "/knn", "/search/knn"],
-            "hybrid": ["/retrieve-hybrid", "/retrieve_hybrid", "/hybrid", "/search/hybrid"],
+            "hybrid": [
+                "/retrieve-rrf",     # rag_api_spec.md 최신 예시
+                "/retrieve-hybrid",
+                "/retrieve_hybrid",
+                "/hybrid",
+                "/search/hybrid",
+            ],
             "weighted_hybrid": [
+                "/retrieve-rrf",     # 일부 환경은 weighted 전용 엔드포인트 없이 rrf만 제공
                 "/retrieve-weighted-hybrid",
                 "/retrieve_weighted_hybrid",
                 "/weighted-hybrid",
@@ -565,6 +572,9 @@ class RagClient:
                 payload_with_mode = dict(request_payload)
                 if endpoint in generic_endpoints:
                     payload_with_mode["mode"] = mode_name
+                elif endpoint == "/retrieve-rrf":
+                    # /retrieve-rrf는 mode 파라미터를 받지 않는 예시가 공식 문서에 명시됨.
+                    payload_with_mode.pop("mode", None)
 
                 url = f"{self.base_url}{endpoint}"
                 r = self.sess.post(url, data=json.dumps(payload_with_mode, ensure_ascii=False), timeout=self.timeout)

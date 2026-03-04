@@ -26,3 +26,12 @@
 #기타
 
 - 등록자 쿼리 : "SELECT SSO_ID FROM SCM_WP.T_T_FOR_MASTER A WHERE 1=1 AND a.sso_id = 'sungmook.cho' AND A.DEPT_NAME LIKE '%SCM%메모리%' and a.POSITION_CODE is not null AND A.SSO_ID NOT IN ('SCM.RPA','SCM 봇','메모리STO2','메모리 STO','dalbong.chatbot01', 'dalbongbot01', 'dalbong.bot01', 'command.center', 'thatcoolguy')"
+
+[RAG Search Error] Index: rp-gocinfo-mail, Error: RAG API Error: no available retrieval endpoint (bm25 not found)
+Traceback (most recent call last):
+  File "H:\python_pjt\main.py", line 684, in search_rag_documents
+    result = rag_client.retrieve(
+             ^^^^^^^^^^^^^^^^^^^^
+  File "H:\python_pjt\main.py", line 556, in retrieve
+    raise Exception(f"RAG API Error: no available retrieval endpoint ({last_error or 'unknown'})")
+Exception: RAG API Error: no available retrieval endpoint (bm25 not found)

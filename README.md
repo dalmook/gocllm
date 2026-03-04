@@ -29,9 +29,12 @@
 
 [RAG Search Error] Index: rp-gocinfo-mail, Error: RAG API Error: no available retrieval endpoint (bm25 not found)
 Traceback (most recent call last):
-  File "H:\python_pjt\main.py", line 684, in search_rag_documents
+  File "H:\python_pjt\main.py", line 709, in search_rag_documents
     result = rag_client.retrieve(
              ^^^^^^^^^^^^^^^^^^^^
-  File "H:\python_pjt\main.py", line 556, in retrieve
+  File "H:\python_pjt\main.py", line 581, in retrieve
     raise Exception(f"RAG API Error: no available retrieval endpoint ({last_error or 'unknown'})")
 Exception: RAG API Error: no available retrieval endpoint (bm25 not found)
+[RAG Search] Total results: 0
+[RAG] 병렬 검색 완료: query=hbm 정보 알려줘 docs=0
+[llm-worker-1][e39729d0-a195-46cf-9ec9-ff3619b8cc17] done queue_wait=0.00s total=7.56s rag_calls=1 llm_calls=1 used_rag=False fallback_reason=검색 문서 유사도가 기준치(0.35)보다 낮았습니다. rpm=1@2026-03-05 08:50

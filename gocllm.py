@@ -114,7 +114,8 @@ RAG_FILTER_DATE_FIELD = os.getenv("RAG_FILTER_DATE_FIELD", "created_time")
 RAG_SIMILARITY_THRESHOLD = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.35"))
 RAG_RECENCY_WEIGHT = float(os.getenv("RAG_RECENCY_WEIGHT", "0.28"))   # 최신성 가중치
 RAG_RECENCY_HALF_LIFE_DAYS = float(os.getenv("RAG_RECENCY_HALF_LIFE_DAYS", "30"))  # 반감기(일)
-RAG_MIN_RECENCY_SCORE = float(os.getenv("RAG_MIN_RECENCY_SCORE", "0.08"))  # 날짜 없을 때 최소점수
+RAG_MIN_RECENCY_SCORE = float(os.getenv("RAG_MIN_RECENCY_SCORE", "0.08"))
+RAG_MISSING_DATE_RECENCY_SCORE = float(os.getenv("RAG_MISSING_DATE_RECENCY_SCORE", "0.08"))
 LLM_WORKERS = max(1, int(os.getenv("LLM_WORKERS", os.getenv("LLM_WORKER_COUNT", "4"))))
 LLM_JOB_QUEUE_MAX = max(1, int(os.getenv("LLM_JOB_QUEUE_MAX", "200")))
 LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", os.getenv("LLM_MAX_CONCURRENCY", "4"))))
@@ -507,7 +508,20 @@ class RagClient:
             "weighted_hybrid": "/retrieve-weighted-hybrid",
         }
         selected_mode = mode if mode in endpoint_map else "hybrid"
-        url = f"{self.base_url}{endpoint_map[selected_mode]}"
+        supports_filter = {"knn", "hybrid", "weighted_hybrid"}
+        if filter and selected_mode not in supports_filter:
+            selected_mode = "hybrid"
+
+        fallback_modes = [selected_mode]
+        if selected_mode in ("hybrid", "weighted_hybrid"):
+            fallback_modes.append("knn")
+            if not filter:
+                fallback_modes.append("bm25")
+        elif selected_mode == "knn" and not filter:
+            fallback_modes.extend(["hybrid", "bm25"])
+        elif selected_mode == "bm25":
+            fallback_modes.append("hybrid")
+
         payload: Dict[str, Any] = {
             "index_name": index_name,
             "permission_groups": permission_groups or ["rag-public"],
@@ -517,20 +531,29 @@ class RagClient:
 
         if filter:
             payload["filter"] = filter
-        if selected_mode == "weighted_hybrid":
-            if bm25_boost is not None:
-                payload["bm25_boost"] = bm25_boost
-            if knn_boost is not None:
-                payload["knn_boost"] = knn_boost
 
-        r = self.sess.post(url, data=json.dumps(payload, ensure_ascii=False), timeout=self.timeout)
-        if r.status_code == 404 and selected_mode == "hybrid":
-            # 배포 버전에 따라 retrieve-rrf만 존재할 수 있어 fallback
-            fallback_url = f"{self.base_url}/retrieve-rrf"
-            r = self.sess.post(fallback_url, data=json.dumps(payload, ensure_ascii=False), timeout=self.timeout)
-        if 200 <= r.status_code < 300:
-            return r.json()
-        raise Exception(f"RAG API Error: {r.status_code} - {r.text}")
+        last_error: Optional[str] = None
+        for mode_name in fallback_modes:
+            endpoint = endpoint_map.get(mode_name)
+            if not endpoint:
+                continue
+            request_payload = dict(payload)
+            if mode_name == "weighted_hybrid":
+                if bm25_boost is not None:
+                    request_payload["bm25_boost"] = bm25_boost
+                if knn_boost is not None:
+                    request_payload["knn_boost"] = knn_boost
+
+            url = f"{self.base_url}{endpoint}"
+            r = self.sess.post(url, data=json.dumps(request_payload, ensure_ascii=False), timeout=self.timeout)
+            if 200 <= r.status_code < 300:
+                return r.json()
+            if r.status_code == 404:
+                last_error = f"{mode_name} not found"
+                continue
+            raise Exception(f"RAG API Error: {r.status_code} - {r.text}")
+
+        raise Exception(f"RAG API Error: no available retrieval endpoint ({last_error or 'unknown'})")
 
 def create_rag_client() -> RagClient:
     """RAG 클라이언트 인스턴스 생성"""
@@ -552,7 +575,7 @@ def _start_of_day(dt: datetime) -> datetime:
     return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def build_date_filter_from_question(question: str) -> Optional[Dict[str, Any]]:
+def _build_date_range_from_question(question: str) -> Optional[Tuple[datetime, datetime]]:
     text = (question or "").strip()
     if not text:
         return None
@@ -560,41 +583,48 @@ def build_date_filter_from_question(question: str) -> Optional[Dict[str, Any]]:
     now = datetime.now(ZoneInfo("Asia/Seoul"))
     today = _start_of_day(now)
     tomorrow = today + timedelta(days=1)
-    start: Optional[datetime] = None
-    end: Optional[datetime] = None
 
     if "오늘" in text:
-        start, end = today, tomorrow
-    elif "어제" in text:
-        start, end = today - timedelta(days=1), today
-    elif "이번주" in text:
+        return today, tomorrow
+    if "어제" in text:
+        return today - timedelta(days=1), today
+    if "이번주" in text:
         week_start = today - timedelta(days=today.weekday())
-        start, end = week_start, week_start + timedelta(days=7)
-    elif "저번주" in text or "지난주" in text:
+        return week_start, week_start + timedelta(days=7)
+    if "저번주" in text or "지난주" in text:
         week_start = today - timedelta(days=today.weekday())
-        start, end = week_start - timedelta(days=7), week_start
-    elif "이번달" in text:
+        return week_start - timedelta(days=7), week_start
+    if "이번달" in text:
         month_start = today.replace(day=1)
         if month_start.month == 12:
             next_month = month_start.replace(year=month_start.year + 1, month=1)
         else:
             next_month = month_start.replace(month=month_start.month + 1)
-        start, end = month_start, next_month
-    else:
-        m = re.search(r"최근\s*(\d+)\s*일", text)
-        if m:
-            days = max(1, int(m.group(1)))
-            start, end = today - timedelta(days=days), tomorrow
+        return month_start, next_month
 
-    if not start or not end:
-        return None
+    m = re.search(r"최근\s*(\d+)\s*일", text)
+    if m:
+        days = max(1, int(m.group(1)))
+        return today - timedelta(days=days), tomorrow
 
+    return None
+
+
+def _build_date_filter(field_name: str, start: datetime, end: datetime) -> Dict[str, Any]:
     return {
-        RAG_FILTER_DATE_FIELD: {
+        field_name: {
             "gte": start.isoformat(),
             "lt": end.isoformat(),
         }
     }
+
+
+def build_date_filter_from_question(question: str) -> Optional[Dict[str, Any]]:
+    date_range = _build_date_range_from_question(question)
+    if not date_range:
+        return None
+    start, end = date_range
+    return _build_date_filter(RAG_FILTER_DATE_FIELD, start, end)
 
 
 def search_rag_documents(
@@ -635,19 +665,41 @@ def search_rag_documents(
     for index in indexes:
         try:
             print(f"[RAG Search] Searching index: {index}")
-            result = rag_client.retrieve(
-                index_name=index,
-                query_text=sanitized_query,
-                mode=mode or RAG_RETRIEVE_MODE,
-                num_result_doc=num_result_doc,
-                permission_groups=[RAG_PERMISSION_GROUPS],
-                filter=filter,
-                bm25_boost=RAG_BM25_BOOST,
-                knn_boost=RAG_KNN_BOOST,
-            )
+            filter_variants: List[Optional[Dict[str, Any]]] = [filter]
+            if filter and len(filter) == 1:
+                date_field = next(iter(filter.keys()))
+                date_rule = filter[date_field]
+                if isinstance(date_rule, dict) and "gte" in date_rule and "lt" in date_rule:
+                    filter_variants = []
+                    seen_fields = set()
+                    for field_name in RAG_FILTER_DATE_FIELD_CANDIDATES:
+                        normalized = (field_name or "").strip()
+                        if not normalized or normalized in seen_fields:
+                            continue
+                        seen_fields.add(normalized)
+                        filter_variants.append(_build_date_filter(normalized, datetime.fromisoformat(date_rule["gte"]), datetime.fromisoformat(date_rule["lt"])))
+
+            result = None
+            for current_filter in filter_variants:
+                result = rag_client.retrieve(
+                    index_name=index,
+                    query_text=sanitized_query,
+                    mode=mode or RAG_RETRIEVE_MODE,
+                    num_result_doc=num_result_doc,
+                    permission_groups=[RAG_PERMISSION_GROUPS],
+                    filter=current_filter,
+                    bm25_boost=RAG_BM25_BOOST,
+                    knn_boost=RAG_KNN_BOOST,
+                )
+                hits_candidate = result.get("hits", {}).get("hits", []) if isinstance(result, dict) else []
+                if not current_filter or hits_candidate:
+                    if current_filter:
+                        print(f"[RAG Search] Date filter field used: {list(current_filter.keys())[0]}")
+                    break
+
             print(f"[RAG Search] Result from {index}: {result}")
             # 결과에서 문서 추출 (Elasticsearch 응답 구조: hits.hits)
-            if "hits" in result and isinstance(result["hits"], dict):
+            if result and "hits" in result and isinstance(result["hits"], dict):
                 hits = result["hits"].get("hits", [])
                 for hit in hits:
                     if "_source" in hit:
@@ -669,10 +721,17 @@ def search_rag_documents(
 
 
 DATE_FIELD_CANDIDATES = [
+    "created_time",
     "updated_at", "updated_date", "last_updated", "last_modified",
     "modified_at", "modified_date", "created_at", "created_date",
     "register_date", "reg_date", "date", "datetime", "timestamp",
     "mail_date", "page_updated_at", "page_created_at"
+]
+RAG_FILTER_DATE_FIELD_CANDIDATES = [
+    RAG_FILTER_DATE_FIELD,
+    "created_time",
+    "created_at",
+    "page_updated_at",
 ]
 def _truncate_text(s: str, max_chars: int = 2200) -> str:
     s = (s or "").strip()
@@ -780,7 +839,7 @@ def rerank_rag_documents(documents: List[Dict[str, Any]]) -> List[Dict[str, Any]
             )
             d["_doc_date"] = dt.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
         else:
-            recency_score = RAG_MIN_RECENCY_SCORE
+            recency_score = min(RAG_MIN_RECENCY_SCORE, RAG_MISSING_DATE_RECENCY_SCORE)
             d["_doc_date"] = "날짜 정보 없음"
         query_hit_bonus = min(max(int(d.get("_query_hits") or 1) - 1, 0), 3) * 0.03
         combined_score = ((1 - RAG_RECENCY_WEIGHT) * vec_norm) + (RAG_RECENCY_WEIGHT * recency_score) + query_hit_bonus
@@ -900,7 +959,7 @@ def retrieve_rag_documents_parallel(queries: List[str], *, top_k: int, rag_filte
     return all_documents
 
 
-LLM_BUSY_MESSAGE = "지금 답변 생성 중입니다. 완료 후 다시 질문해주세요."
+LLM_BUSY_MESSAGE = "지금 답변 만드는 중이에요. 잠시 후 다시 질문해 주세요 🙏"
 LLM_QUEUE_FULL_MESSAGE = "요청이 많아 잠시 후 다시 시도해주세요."
 llm_job_queue: "queue.Queue[dict]" = queue.Queue(maxsize=LLM_JOB_QUEUE_MAX)
 llm_task_state_lock = threading.Lock()
@@ -2249,7 +2308,7 @@ async def post_message(request: Request):
                 }
                 user_key = _build_user_key(job)
                 if not reserve_user_singleflight(user_key):
-                    chatBot.send_text(chatroom_id, "지금 답변 만드는 중이에요. 잠시 후 다시 질문해 주세요 🙏")
+                    chatBot.send_text(chatroom_id, LLM_BUSY_MESSAGE)
                     return {"ok": True}
 
                 if not enqueue_llm_job(job):

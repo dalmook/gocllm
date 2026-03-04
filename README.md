@@ -22,3 +22,7 @@
 - SINGLE에서 `INTRO`/`HOME` 버튼 또는 트리거 텍스트 → 홈 카드
 - GROUP에서는 UI는 DM 라우팅되지만 LLM은 기본 비활성
 - 예: `HBM 저번주 이슈 정리해줘` → 저번주 기간 필터를 RAG 조회에 적용, 관련 문서가 충분하면 문서 기반 + AI 추가참고 형식으로 응답
+
+#기타
+
+- 등록자 쿼리 : "SELECT SSO_ID FROM SCM_WP.T_T_FOR_MASTER A WHERE 1=1 AND a.sso_id = 'sungmook.cho' AND A.DEPT_NAME LIKE '%SCM%메모리%' and a.POSITION_CODE is not null AND A.SSO_ID NOT IN ('SCM.RPA','SCM 봇','메모리STO2','메모리 STO','dalbong.chatbot01', 'dalbongbot01', 'dalbong.bot01', 'command.center', 'thatcoolguy')"

@@ -502,10 +502,16 @@ class RagClient:
     ) -> Dict[str, Any]:
         """RAG 문서 검색: bm25 / knn / hybrid / weighted_hybrid"""
         endpoint_map = {
-            "bm25": "/retrieve-bm25",
-            "knn": "/retrieve-knn",
-            "hybrid": "/retrieve-hybrid",
-            "weighted_hybrid": "/retrieve-weighted-hybrid",
+            # 스펙 문서 기준 retrieval 명칭 + 운영 API에서 사용되던 구 버전 경로를 모두 시도
+            "bm25": ["/retrieve-bm25", "/retrieve_bm25", "/bm25", "/search/bm25"],
+            "knn": ["/retrieve-knn", "/retrieve_knn", "/knn", "/search/knn"],
+            "hybrid": ["/retrieve-hybrid", "/retrieve_hybrid", "/hybrid", "/search/hybrid"],
+            "weighted_hybrid": [
+                "/retrieve-weighted-hybrid",
+                "/retrieve_weighted_hybrid",
+                "/weighted-hybrid",
+                "/search/weighted-hybrid",
+            ],
         }
         selected_mode = mode if mode in endpoint_map else "hybrid"
         supports_filter = {"knn", "hybrid", "weighted_hybrid"}
@@ -533,9 +539,12 @@ class RagClient:
             payload["filter"] = filter
 
         last_error: Optional[str] = None
+        generic_endpoints = ["/retrieve", "/search", "/retrieval"]
+        attempted_requests = set()
+
         for mode_name in fallback_modes:
-            endpoint = endpoint_map.get(mode_name)
-            if not endpoint:
+            endpoints = endpoint_map.get(mode_name)
+            if not endpoints:
                 continue
             request_payload = dict(payload)
             if mode_name == "weighted_hybrid":
@@ -544,14 +553,30 @@ class RagClient:
                 if knn_boost is not None:
                     request_payload["knn_boost"] = knn_boost
 
-            url = f"{self.base_url}{endpoint}"
-            r = self.sess.post(url, data=json.dumps(request_payload, ensure_ascii=False), timeout=self.timeout)
-            if 200 <= r.status_code < 300:
-                return r.json()
-            if r.status_code == 404:
-                last_error = f"{mode_name} not found"
-                continue
-            raise Exception(f"RAG API Error: {r.status_code} - {r.text}")
+            mode_endpoints = list(endpoints)
+            mode_endpoints.extend(generic_endpoints)
+
+            for endpoint in mode_endpoints:
+                req_key = (mode_name, endpoint)
+                if req_key in attempted_requests:
+                    continue
+                attempted_requests.add(req_key)
+
+                payload_with_mode = dict(request_payload)
+                if endpoint in generic_endpoints:
+                    payload_with_mode["mode"] = mode_name
+
+                url = f"{self.base_url}{endpoint}"
+                r = self.sess.post(url, data=json.dumps(payload_with_mode, ensure_ascii=False), timeout=self.timeout)
+                if 200 <= r.status_code < 300:
+                    return r.json()
+
+                err_text = (r.text or "").lower()
+                if r.status_code == 404 or "not found" in err_text or "no handler" in err_text:
+                    last_error = f"{mode_name} not found"
+                    continue
+
+                raise Exception(f"RAG API Error: {r.status_code} - {r.text}")
 
         raise Exception(f"RAG API Error: no available retrieval endpoint ({last_error or 'unknown'})")
 

@@ -6,6 +6,7 @@ import base64
 import time
 import math
 import uuid
+import re
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -103,11 +104,18 @@ RAG_PERMISSION_GROUPS = os.getenv("RAG_PERMISSION_GROUPS", "rag-public")
 RAG_NUM_RESULT_DOC = int(os.getenv("RAG_NUM_RESULT_DOC", "6"))   # vector search top_k
 RAG_CONTEXT_DOCS = int(os.getenv("RAG_CONTEXT_DOCS", "3"))       # rerank 후 최종 반영 top_k
 RAG_REWRITE_QUERY_COUNT = max(1, int(os.getenv("RAG_REWRITE_QUERY_COUNT", "2")))
+ENABLE_QUERY_REWRITE = os.getenv("ENABLE_QUERY_REWRITE", "true").lower() == "true"
+MAX_RAG_QUERIES = max(1, int(os.getenv("MAX_RAG_QUERIES", "2")))
+RAG_INCLUDE_ORIGINAL_QUERY = os.getenv("RAG_INCLUDE_ORIGINAL_QUERY", "true").lower() == "true"
+RAG_RETRIEVE_MODE = os.getenv("RAG_RETRIEVE_MODE", "hybrid").lower()
+RAG_BM25_BOOST = float(os.getenv("RAG_BM25_BOOST", "0.025"))
+RAG_KNN_BOOST = float(os.getenv("RAG_KNN_BOOST", "7.98"))
 RAG_SIMILARITY_THRESHOLD = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.35"))
 RAG_RECENCY_WEIGHT = float(os.getenv("RAG_RECENCY_WEIGHT", "0.28"))   # 최신성 가중치
 RAG_RECENCY_HALF_LIFE_DAYS = float(os.getenv("RAG_RECENCY_HALF_LIFE_DAYS", "30"))  # 반감기(일)
 RAG_MIN_RECENCY_SCORE = float(os.getenv("RAG_MIN_RECENCY_SCORE", "0.15"))  # 날짜 없을 때 최소점수
-LLM_WORKER_COUNT = max(1, int(os.getenv("LLM_WORKER_COUNT", "4")))
+LLM_WORKERS = max(1, int(os.getenv("LLM_WORKERS", os.getenv("LLM_WORKER_COUNT", "4"))))
+LLM_JOB_QUEUE_MAX = max(1, int(os.getenv("LLM_JOB_QUEUE_MAX", "200")))
 LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", "4")))
 LLM_ALLOWED_USERS_SQL = os.getenv(
     "LLM_ALLOWED_USERS_SQL",
@@ -461,8 +469,8 @@ def llm_invoke_with_retry(llm, payload, *, attempts: int = 3, base_delay: float 
 # RAG Client
 # =========================
 class RagClient:
-    """RAG API 클라이언트 (간소화 버전)"""
-    
+    """RAG API 클라이언트"""
+
     def __init__(self, api_key: str, dep_ticket: str, base_url: str, timeout: int = 30):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -472,27 +480,47 @@ class RagClient:
             "x-dep-ticket": dep_ticket,
             "api-key": api_key,
         })
-    
-    def retrieve_rrf(
+
+    def retrieve(
         self,
         index_name: str,
         query_text: str,
+        *,
+        mode: str = "hybrid",
         num_result_doc: int = 3,
         permission_groups: Optional[List[str]] = None,
+        filter: Optional[Dict[str, Any]] = None,
+        bm25_boost: Optional[float] = None,
+        knn_boost: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """RAG 문서 검색"""
-        url = f"{self.base_url}/retrieve-rrf"
-        payload = {
+        """RAG 문서 검색: bm25 / knn / hybrid / weighted_hybrid"""
+        endpoint_map = {
+            "bm25": "/retrieve-bm25",
+            "knn": "/retrieve-knn",
+            "hybrid": "/retrieve-rrf",
+            "weighted_hybrid": "/retrieve-weighted-hybrid",
+        }
+        selected_mode = mode if mode in endpoint_map else "hybrid"
+        url = f"{self.base_url}{endpoint_map[selected_mode]}"
+        payload: Dict[str, Any] = {
             "index_name": index_name,
             "permission_groups": permission_groups or ["rag-public"],
             "query_text": query_text,
             "num_result_doc": num_result_doc,
         }
+
+        if filter:
+            payload["filter"] = filter
+        if selected_mode == "weighted_hybrid":
+            if bm25_boost is not None:
+                payload["bm25_boost"] = bm25_boost
+            if knn_boost is not None:
+                payload["knn_boost"] = knn_boost
+
         r = self.sess.post(url, data=json.dumps(payload, ensure_ascii=False), timeout=self.timeout)
         if 200 <= r.status_code < 300:
             return r.json()
         raise Exception(f"RAG API Error: {r.status_code} - {r.text}")
-
 
 def create_rag_client() -> RagClient:
     """RAG 클라이언트 인스턴스 생성"""
@@ -503,11 +531,20 @@ def create_rag_client() -> RagClient:
     )
 
 
+def sanitize_query(query: str) -> str:
+    cleaned = re.sub(r"[\x00-\x1F\x7F]", " ", query or "")
+    cleaned = re.sub(r"[^\w\sㄱ-ㅎ가-힣]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def search_rag_documents(
     query: str,
     indexes: Optional[List[str]] = None,
     *,
     top_k: Optional[int] = None,
+    mode: Optional[str] = None,
+    filter: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     RAG 문서 검색 (다중 인덱스 지원)
@@ -522,7 +559,12 @@ def search_rag_documents(
     if indexes is None:
         indexes = [x.strip() for x in RAG_INDEXES.split(",") if x.strip()]
     
-    print(f"[RAG Search] Query: {query}")
+    sanitized_query = sanitize_query(query)
+    if not sanitized_query:
+        return []
+
+    print(f"[RAG Search] Query(raw): {query}")
+    print(f"[RAG Search] Query(sanitized): {sanitized_query}")
     print(f"[RAG Search] Indexes: {indexes}")
     print(f"[RAG Search] Base URL: {RAG_BASE_URL}")
     num_result_doc = top_k or RAG_NUM_RESULT_DOC
@@ -534,11 +576,15 @@ def search_rag_documents(
     for index in indexes:
         try:
             print(f"[RAG Search] Searching index: {index}")
-            result = rag_client.retrieve_rrf(
+            result = rag_client.retrieve(
                 index_name=index,
-                query_text=query,
+                query_text=sanitized_query,
+                mode=mode or RAG_RETRIEVE_MODE,
                 num_result_doc=num_result_doc,
                 permission_groups=[RAG_PERMISSION_GROUPS],
+                filter=filter,
+                bm25_boost=RAG_BM25_BOOST,
+                knn_boost=RAG_KNN_BOOST,
             )
             print(f"[RAG Search] Result from {index}: {result}")
             # 결과에서 문서 추출 (Elasticsearch 응답 구조: hits.hits)
@@ -773,10 +819,10 @@ def retrieve_rag_documents_parallel(queries: List[str], *, top_k: int) -> List[D
         return []
 
     all_documents: List[Dict[str, Any]] = []
-    max_workers = min(len(query_list), RAG_REWRITE_QUERY_COUNT, 2)
+    max_workers = min(len(query_list), MAX_RAG_QUERIES, 2)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
-            executor.submit(search_rag_documents, query, top_k=top_k): query
+            executor.submit(search_rag_documents, query, top_k=top_k, mode=RAG_RETRIEVE_MODE): query
             for query in query_list
         }
         for future in as_completed(future_map):
@@ -791,64 +837,96 @@ def retrieve_rag_documents_parallel(queries: List[str], *, top_k: int) -> List[D
     return all_documents
 
 
-LLM_BUSY_MESSAGE = "지금 이전 질문을 처리 중이에요. 답변이 끝난 뒤 다시 보내주세요."
-llm_task_queue: "queue.Queue[dict]" = queue.Queue()
+LLM_BUSY_MESSAGE = "지금 답변 생성 중입니다. 완료 후 다시 질문해주세요."
+LLM_QUEUE_FULL_MESSAGE = "요청이 많아 잠시 후 다시 시도해주세요."
+llm_job_queue: "queue.Queue[dict]" = queue.Queue(maxsize=LLM_JOB_QUEUE_MAX)
 llm_task_state_lock = threading.Lock()
-llm_pending_keys: set[str] = set()
-llm_concurrency_limiter = threading.Semaphore(LLM_MAX_CONCURRENT)
+inflight: Dict[str, bool] = {}
+inflight_lock = threading.Lock()
+llm_sem = threading.Semaphore(LLM_MAX_CONCURRENT)
 llm_workers_started = False
+job_metrics_lock = threading.Lock()
+job_metrics = {
+    "minute": "",
+    "count": 0,
+}
 
 
-def build_llm_task_keys(chatroom_id: int, sender_knox: str) -> List[str]:
-    keys = [f"room:{chatroom_id}"]
-    sender_key = (sender_knox or "").strip()
-    if sender_key:
-        keys.append(f"user:{sender_key}")
-    return keys
+def _mark_job_counter():
+    now_minute = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
+    with job_metrics_lock:
+        if job_metrics["minute"] != now_minute:
+            job_metrics["minute"] = now_minute
+            job_metrics["count"] = 0
+        job_metrics["count"] += 1
+        return job_metrics["minute"], job_metrics["count"]
 
 
-def enqueue_llm_task(chatroom_id: int, question: str, sender_knox: str) -> bool:
-    dedupe_keys = build_llm_task_keys(chatroom_id, sender_knox)
-    with llm_task_state_lock:
-        if any(key in llm_pending_keys for key in dedupe_keys):
-            return False
-        llm_pending_keys.update(dedupe_keys)
-
+def enqueue_llm_job(job: Dict[str, Any]) -> bool:
     try:
-        llm_task_queue.put(
-            {
-                "chatroom_id": chatroom_id,
-                "question": question,
-                "sender_knox": sender_knox,
-                "dedupe_keys": dedupe_keys,
-            }
-        )
+        llm_job_queue.put_nowait(job)
+        qsize = llm_job_queue.qsize()
+        print(f"[LLM][{job.get('request_id')}] enqueue ok qsize={qsize}")
         return True
-    except Exception:
-        _release_llm_task_keys(dedupe_keys)
-        raise
+    except queue.Full:
+        print(f"[LLM][{job.get('request_id')}] enqueue failed queue full")
+        return False
 
 
-def _release_llm_task_keys(dedupe_keys: List[str]):
-    with llm_task_state_lock:
-        for key in dedupe_keys:
-            llm_pending_keys.discard(key)
+def _build_user_key(task: Dict[str, Any]) -> str:
+    sender_knox = (task.get("sender_knox") or "").strip()
+    sender_name = (task.get("sender_name") or "").strip()
+    if sender_knox:
+        return sender_knox
+    if sender_name:
+        return sender_name
+    return str(task.get("chatroom_id"))
 
 
 def llm_worker_loop(worker_name: str):
     while True:
-        task = llm_task_queue.get()
+        task = llm_job_queue.get()
+        request_id = task.get("request_id")
+        requested_at = float(task.get("requested_at") or time.time())
+        dequeued_at = time.time()
+        user_key = _build_user_key(task)
+
+        with inflight_lock:
+            if inflight.get(user_key):
+                try:
+                    chatBot.send_text(task["chatroom_id"], LLM_BUSY_MESSAGE)
+                except Exception as send_err:
+                    print(f"[{worker_name}][{request_id}] busy msg failed: {send_err}")
+                print(f"[{worker_name}][{request_id}] dropped by inflight user_key={user_key}")
+                llm_job_queue.task_done()
+                continue
+            inflight[user_key] = True
+
+        rag_calls = 0
+        llm_calls = 0
+        used_rag = False
+        fallback_reason = ""
         try:
-            process_llm_chat_background(
-                task["chatroom_id"],
-                task["question"],
-                task["sender_knox"],
-            )
+            with llm_sem:
+                minute, minute_count = _mark_job_counter()
+                stats = process_llm_chat_background(task)
+                rag_calls = int(stats.get("rag_calls", 0))
+                llm_calls = int(stats.get("llm_calls", 0))
+                used_rag = bool(stats.get("used_rag", False))
+                fallback_reason = str(stats.get("fallback_reason", ""))
+                total_latency = time.time() - requested_at
+                queue_wait = dequeued_at - requested_at
+                print(
+                    f"[{worker_name}][{request_id}] done queue_wait={queue_wait:.2f}s total={total_latency:.2f}s "
+                    f"rag_calls={rag_calls} llm_calls={llm_calls} used_rag={used_rag} "
+                    f"fallback_reason={fallback_reason} rpm={minute_count}@{minute}"
+                )
         except Exception as e:
-            print(f"[{worker_name}] unexpected worker error: {e}")
+            print(f"[{worker_name}][{request_id}] unexpected worker error: {e}")
         finally:
-            _release_llm_task_keys(task.get("dedupe_keys", []))
-            llm_task_queue.task_done()
+            with inflight_lock:
+                inflight[user_key] = False
+            llm_job_queue.task_done()
 
 
 def start_llm_workers():
@@ -859,7 +937,7 @@ def start_llm_workers():
     with llm_task_state_lock:
         if llm_workers_started:
             return
-        for idx in range(LLM_WORKER_COUNT):
+        for idx in range(LLM_WORKERS):
             threading.Thread(
                 target=llm_worker_loop,
                 args=(f"llm-worker-{idx + 1}",),
@@ -868,13 +946,42 @@ def start_llm_workers():
             ).start()
         llm_workers_started = True
 
+def build_search_queries(question: str, llm: ChatOpenAI) -> List[str]:
+    sanitized_original = sanitize_query(question)
+    if not sanitized_original:
+        return []
 
-def _process_llm_chat_background_impl(chatroom_id: int, question: str, sender_knox: str):
+    queries: List[str] = []
+    if RAG_INCLUDE_ORIGINAL_QUERY:
+        queries.append(sanitized_original)
+
+    if ENABLE_QUERY_REWRITE and len(sanitized_original) > 12:
+        rewritten = rewrite_search_queries(question, llm)
+        for item in rewritten:
+            sq = sanitize_query(item)
+            if sq and sq not in queries:
+                queries.append(sq)
+
+    if not queries:
+        queries = [sanitized_original]
+    return queries[:MAX_RAG_QUERIES]
+
+
+def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
+    chatroom_id = int(task["chatroom_id"])
+    question = (task.get("question") or "").strip()
+    sender_knox = task.get("sender_knox") or ""
+    stats = {
+        "rag_calls": 0,
+        "llm_calls": 0,
+        "used_rag": False,
+        "fallback_reason": "",
+    }
+
     try:
         user_id = sender_knox if sender_knox else "bot"
         llm = create_llm_chatbot(user_id)
 
-        # ✅ 일반/실시간 성격 질문은 RAG 자체를 스킵해서 호출/지연/오탐 줄이기
         prefer_general = should_prefer_general_llm(question)
         if prefer_general:
             from langchain_core.messages import SystemMessage, HumanMessage
@@ -899,111 +1006,52 @@ def _process_llm_chat_background_impl(chatroom_id: int, question: str, sender_kn
                 HumanMessage(content=question)
             ]
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
+            stats["llm_calls"] += 1
+            stats["fallback_reason"] = "prefer_general"
             answer = "📋 문서 기반 답변 미적용\n- 일반 지식/실시간 성격의 질문으로 판단했습니다.\n- 아래는 일반 LLM 답변입니다.\n\n" + response.content.strip()
+            chatBot.send_text(chatroom_id, f"🤖 {answer}")
+            return stats
 
-            try:
-                chatBot.send_text(chatroom_id, f"🤖 {answer}")
-            except Exception as send_err:
-                print("[send final answer failed]", send_err)
-            return
-
-        print(f"[RAG] 원문 질문: {question}")
-        if len(question.strip()) <= 12:
-            search_queries = [question]
-        else:
-            search_queries = rewrite_search_queries(question, llm)
-
-        if question not in search_queries:
-            search_queries = [question] + search_queries
-        search_queries = search_queries[:RAG_REWRITE_QUERY_COUNT]
-        print(f"[RAG] 재작성 질의들: {search_queries}")
+        search_queries = build_search_queries(question, llm)
+        print(f"[RAG] search queries: {search_queries}")
 
         all_rag_documents = retrieve_rag_documents_parallel(
             search_queries,
             top_k=RAG_NUM_RESULT_DOC,
         )
-        print(f"[RAG] 원시 후보 문서 수: {len(all_rag_documents)}")
+        stats["rag_calls"] = len(search_queries)
 
         reranked_docs = rerank_rag_documents(all_rag_documents)[:RAG_NUM_RESULT_DOC]
         top_docs = reranked_docs[:RAG_CONTEXT_DOCS]
 
-        print(f"[RAG] 재정렬 후 상위 문서 수: {len(top_docs)}")
-        for i, d in enumerate(top_docs, 1):
-            print(
-                f"[RAG][TOP{i}] "
-                f"title={d.get('title','')} | "
-                f"combined={d.get('_combined_score')} | "
-                f"vector={d.get('_vector_score')} | "
-                f"date={d.get('_doc_date')}"
-            )
-
         top_score = float(top_docs[0].get("_combined_score") or 0.0) if top_docs else 0.0
         skip_rag = top_score < RAG_SIMILARITY_THRESHOLD
-        rag_context = "" if skip_rag else format_rag_context(top_docs, max_docs=RAG_CONTEXT_DOCS)
-        print(f"[RAG] 컨텍스트 길이: {len(rag_context)}")
-        print(f"[RAG] top_combined_score={top_score}, threshold={RAG_SIMILARITY_THRESHOLD}, skip_rag={skip_rag}")
-
-        prefer_general = should_prefer_general_llm(question)
         rag_relevant = (not skip_rag) and is_rag_result_relevant(question, top_docs)
+        rag_context = format_rag_context(top_docs, max_docs=RAG_CONTEXT_DOCS) if rag_relevant else ""
 
-        print(f"[RAG] prefer_general={prefer_general}, rag_relevant={rag_relevant}")
-
-        # 응답 생성
-        if (not prefer_general) and rag_context and rag_relevant:
+        if rag_context and rag_relevant:
             from langchain_core.messages import SystemMessage, HumanMessage
+            stats["used_rag"] = True
 
             system_prompt = f"""
             당신은 GOC 업무 지원 챗봇입니다.
             반드시 아래 검색 문서를 최우선 근거로 사용하여 답변하세요.
-            문서가 여러 개이면 종합점수(combined score)가 높은 문서, 즉 관련도가 높고 최신성이 높은 문서를 우선 반영하세요.
 
             [검색 문서]
             {rag_context}
 
-            답변 규칙
-
-            1. "📂 문서 기반 답변" 섹션에서는 반드시 문서에 있는 내용만 답변합니다.
-            2. 문서에 없는 내용은 문서 기반 답변 섹션에 쓰지 않습니다.
-            3. "💡 AI 의견" 섹션에서는 문서를 바탕으로 일반적인 해석, 보충 설명, 실무적 의미를 덧붙일 수 있습니다.
-            4. AI 의견 섹션의 내용은 문서에 직접 적혀 있지 않을 수 있으므로, 반드시 참고용이라고 표시합니다.
-            5. 문서 간 내용이 다르면 최신 문서 기준으로 정리합니다.
-            6. 날짜, 기간, 수량, 조직명, 제품명 등은 최대한 구체적으로 적습니다.
-            7. 마크다운 문법(**, ###, --- 등)은 사용하지 않습니다.
-            8. 일반 텍스트 형식으로 작성합니다.
-            9. 너무 장황하게 쓰지 말고, 실무자가 바로 읽을 수 있게 정리합니다.
-
             답변 형식
-
             📌 한줄 요약
-            한 문장으로 핵심 요약
-
             📂 문서 기반 답변
-            - 문서에 근거한 핵심 내용 2~5개
-            - 문서에 없는 부분은 "문서에 해당 정보가 없습니다."로 표시
-
             💡 AI 의견
-            - 문서를 읽고 이해하는 데 도움이 되는 일반 설명 또는 해석 1~3개
-            - 단, 문서에 직접 없는 내용은 추정/해석이므로 단정하지 않음
-
             📂 근거 문서
-            - 문서명 | 문서일시 | 핵심 근거 한줄
-
             ⚠️ 주의
-            - "AI 의견"은 일반 LLM 보충 설명이며 문서 원문 자체는 아닙니다.
-
-            🔗 GOC 이슈지
-            https://confluence.samsungds.net/spaces/GOCMEM/pages/3150978308/%EC%9D%B4%EC%8A%88%EC%A7%80
             """
 
-            messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=question)
-            ]
+            messages = [SystemMessage(content=system_prompt), HumanMessage(content=question)]
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
+            stats["llm_calls"] += 1
             answer = response.content.strip()
-
-            if "💡 AI 의견" not in answer:
-                answer += "\n\n💡 AI 의견\n- 문서의 핵심 내용을 이해하기 쉽게 보충 설명한 참고용 안내입니다.\n- 세부 판단은 반드시 위 문서 기반 답변과 원문 문서를 우선 확인해주세요."
 
             if "📂 근거 문서" not in answer:
                 source_lines = []
@@ -1013,65 +1061,46 @@ def _process_llm_chat_background_impl(chatroom_id: int, question: str, sender_kn
                     url = doc.get("confluence_mail_page_url", "") or doc.get("url", "")
                     line = f"- {title} | {doc_date}"
                     if url:
-                        line += f"\n  {url}"
+                        line += f"\n  🔗 GO LINK: {url}"
                     source_lines.append(line)
-
                 if source_lines:
                     answer += "\n\n📂 근거 문서\n" + "\n".join(source_lines)
         else:
             from langchain_core.messages import SystemMessage, HumanMessage
-
-            print("[RAG] 문서 없음 fallback")
-
             fallback_system_prompt = """
 당신은 GOC 업무 지원 챗봇입니다.
-이번 질문은 문서 검색 결과가 없으므로 일반 LLM 답변으로 안내합니다.
+이번 질문은 문서 검색 결과가 없거나 관련성이 낮아 일반 LLM 답변으로 안내합니다.
 과도한 추측은 피하고, 불확실한 내용은 단정하지 마세요.
-
-답변 형식
-📌 한줄 요약
-한 문장 요약
-
-✅ 일반 답변
-- 핵심 내용 2~5개
-
-⚠️ 참고
-- 이번 답변은 문서 기반이 아니라 일반 답변임을 짧게 안내
 """
-            messages = [
-                SystemMessage(content=fallback_system_prompt),
-                HumanMessage(content=question)
-            ]
+            messages = [SystemMessage(content=fallback_system_prompt), HumanMessage(content=question)]
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
-            reason = "관련 문서를 찾지 못했습니다."
-            
-            if prefer_general:
-                reason = "일반 지식/실시간 성격의 질문으로 판단했습니다."
-            elif skip_rag:
-                reason = f"검색 문서 유사도가 기준치({RAG_SIMILARITY_THRESHOLD})보다 낮았습니다."
-            elif rag_context and not rag_relevant:
-                reason = "검색 문서는 있었지만 질문과의 관련성이 낮았습니다."
+            stats["llm_calls"] += 1
 
+            reason = "관련 문서를 찾지 못했습니다."
+            if skip_rag:
+                reason = f"검색 문서 유사도가 기준치({RAG_SIMILARITY_THRESHOLD})보다 낮았습니다."
+            elif top_docs and not rag_relevant:
+                reason = "검색 문서는 있었지만 질문과의 관련성이 낮았습니다."
+            stats["fallback_reason"] = reason
             answer = f"📋 문서 기반 답변 미적용\n- {reason}\n- 아래는 일반 LLM 답변입니다.\n\n" + response.content.strip()
 
-        try:
-            chatBot.send_text(chatroom_id, f"🤖 {answer}")
-        except Exception as send_err:
-            print("[send final answer failed]", send_err)
+        chatBot.send_text(chatroom_id, f"🤖 {answer}")
+        return stats
 
     except Exception as e:
         print(f"[LLM Background Error] {e}")
         import traceback
         traceback.print_exc()
+        stats["fallback_reason"] = f"error:{e}"
         try:
             chatBot.send_text(chatroom_id, f"LLM 응답 오류: {e}")
         except Exception as send_err:
             print("[send error message failed]", send_err)
+        return stats
 
 
-def process_llm_chat_background(chatroom_id: int, question: str, sender_knox: str):
-    with llm_concurrency_limiter:
-        _process_llm_chat_background_impl(chatroom_id, question, sender_knox)
+def process_llm_chat_background(task: Dict[str, Any]) -> Dict[str, Any]:
+    return _process_llm_chat_background_impl(task)
 
 def rewrite_search_queries(question: str, llm: ChatOpenAI) -> List[str]:
     """
@@ -1132,6 +1161,25 @@ Samsung semiconductor production volume"""
 # =========================
 # 3) Action Parsing
 # =========================
+def _extract_group_llm_question(txt: str) -> str:
+    text = (txt or "").strip()
+    if not text:
+        return ""
+    mention = (LLM_GROUP_MENTION_TEXT or "").strip()
+    if mention and text.startswith(mention):
+        return text[len(mention):].strip(" :")
+
+    for prefix in LLM_GROUP_PREFIXES:
+        pfx = prefix.strip()
+        if not pfx:
+            continue
+        if text.startswith(pfx):
+            return text[len(pfx):].strip(" :")
+        if text.startswith(pfx + ",") or text.startswith(pfx + ":"):
+            return text[len(pfx)+1:].strip()
+    return ""
+
+
 def parse_action_payload(info: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     chat_msg = info.get("chatMsg", "") or ""
     raw = chat_msg
@@ -1145,46 +1193,51 @@ def parse_action_payload(info: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
             payload = json.loads(raw)
             action = payload.get("action", "HOME")
             return action, payload
-        except:
+        except Exception:
             pass
 
     txt = raw.strip()
     txt_u = txt.upper()
-
     chat_type = (info.get("chatType") or "").upper()
 
-    # 2) ✅ SINGLE(1:1) 단축키 → URL
+    # 2) 시스템 트리거 우선
+    if txt_u in ("INTRO", "HOME") or txt in ("홈", "/home"):
+        return "INTRO", {}
+    if txt in ("바로가기", "/바로가기", "링크", "/links", "links"):
+        return "QUICK_LINKS", {}
+
+    # 3) SINGLE 단축키 OPEN_URL
     if chat_type == "SINGLE":
         key = txt_u[1:] if txt_u.startswith("/") else txt_u
         title, url = resolve_quick_link(key)
         if url:
             return "OPEN_URL", {"title": title, "url": url}
 
-    # ✅ 일부 버튼/시스템 트리거가 TEXT로 들어오는 케이스(예: chatMsg="INTRO")
-    if txt_u in ("INTRO", "HOME"):
-        return "INTRO", {}  # 아래 핸들러에서 ("HOME","INTRO")로 홈카드 처리됨
-
-    if txt in ("홈", "/home"):
-        return "HOME", {}
-    if txt in ("바로가기", "/바로가기", "링크", "/links", "links"):
-        return "QUICK_LINKS", {}
+    # 4) 명령어
     if txt.startswith("/warn"):
         return "WARN_RUN", {}
     if txt.startswith("/issue"):
         return "ISSUE_FORM", {}
 
-    # 4) 명시적 LLM 트리거 (/ask, 질문:) → SINGLE에서만 허용
-    if chat_type == "SINGLE" and (txt.startswith("/ask ") or txt.startswith("질문:")):
-        question = txt[5:] if txt.startswith("/ask ") else txt[3:]
-        return "LLM_CHAT", {"question": question.strip()}
-
-    # 5) /ask 없이도 대화처럼 LLM → SINGLE에서만
-    # - 단, /로 시작하는 명령어는(미정의 명령 포함) LLM로 안 보냄
+    # 5) LLM 라우팅
     if chat_type == "SINGLE":
+        if txt.startswith("/ask "):
+            return "LLM_CHAT", {"question": txt[5:].strip()}
+        if txt.startswith("질문:"):
+            return "LLM_CHAT", {"question": txt[3:].strip()}
         if not txt.startswith("/"):
             return "LLM_CHAT", {"question": txt}
+        return "NOOP", {}
 
-    # 6) GROUP에서는 LLM로 절대 라우팅하지 않음
+    if chat_type == "GROUP":
+        if LLM_CHAT_DEFAULT_MODE == "all" and not txt.startswith("/"):
+            return "LLM_CHAT", {"question": txt}
+        if LLM_CHAT_DEFAULT_MODE == "mention":
+            q = _extract_group_llm_question(txt)
+            if q:
+                return "LLM_CHAT", {"question": q}
+        return "NOOP", {}
+
     return "NOOP", {}
 
 
@@ -2010,7 +2063,7 @@ def on_startup():
     global chatBot
     store.init_db()
     start_llm_workers()
-    print(f"[startup] LLM workers started: workers={LLM_WORKER_COUNT}, max_concurrent={LLM_MAX_CONCURRENT}")
+    print(f"[startup] LLM workers started: workers={LLM_WORKERS}, max_concurrent={LLM_MAX_CONCURRENT}, queue_max={LLM_JOB_QUEUE_MAX}")
 
     # KNOX 연결 - 실패해도 앱은 계속 실행
     try:
@@ -2096,15 +2149,25 @@ async def post_message(request: Request):
                 return {"ok": True}
 
             try:
-                if not enqueue_llm_task(chatroom_id, question, sender_knox):
-                    chatBot.send_text(chatroom_id, LLM_BUSY_MESSAGE)
-                    return {"ok": True}
+                request_id = str(uuid.uuid4())
+                job = {
+                    "chatroom_id": chatroom_id,
+                    "sender_knox": sender_knox,
+                    "sender_name": sender_name,
+                    "chat_type": (info.get("chatType") or "").upper(),
+                    "question": question,
+                    "requested_at": time.time(),
+                    "request_id": request_id,
+                }
 
-                # 먼저 안내 메시지 전송
                 try:
                     chatBot.send_text(chatroom_id, "🤔 검색 중입니다. 잠시만 기다려주세요...")
                 except Exception as send_err:
                     print("[send thinking message failed]", send_err)
+
+                if not enqueue_llm_job(job):
+                    chatBot.send_text(chatroom_id, LLM_QUEUE_FULL_MESSAGE)
+                    return {"ok": True}
 
                 return {"ok": True}
             except Exception as e:
@@ -2115,7 +2178,7 @@ async def post_message(request: Request):
                     chatBot.send_text(chatroom_id, f"LLM 요청 처리 오류: {e}")
                 except Exception:
                     pass
-                return {"ok": True}                
+                return {"ok": True}
 
         
         # ---------- Generic Query Router ----------

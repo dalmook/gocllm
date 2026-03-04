@@ -98,18 +98,35 @@ RAG_DEP_TICKET = os.getenv("RAG_DEP_TICKET", "credential:TICKET-e09692e2-45e3-46
 RAG_API_KEY = os.getenv("RAG_API_KEY", "rag-laeeKyA.KazNAgzjr-d1iK9rUClS2vdqKLZ4oOOcsOhhuR3tJaAYa3h73BE7SdjgLjxQsEtJCN6Oc7B1mJYq1Pu_ruTKmcmeujAVpmDxms44OdjGCeHGBTisaSFHdqyepsbEa3nw")
 RAG_BASE_URL = os.getenv("RAG_BASE_URL", "http://apigw.samsungds.net:8000/ds_llm_rag/2/dsllmrag/elastic/v2")
 # RAG 인덱스 목록 (쉼표로 구분, 나중에 추가 가능)
-RAG_INDEXES = os.getenv("RAG_INDEXES", "rp-gocinfo_mail_jsonl")
+RAG_INDEXES = os.getenv("RAG_INDEXES", "rp-gocinfo-mail")
 RAG_PERMISSION_GROUPS = os.getenv("RAG_PERMISSION_GROUPS", "rag-public")
 # RAG 후보는 top6까지만 가져오고, 최종 컨텍스트는 top3만 사용
 RAG_NUM_RESULT_DOC = int(os.getenv("RAG_NUM_RESULT_DOC", "6"))   # vector search top_k
 RAG_CONTEXT_DOCS = int(os.getenv("RAG_CONTEXT_DOCS", "3"))       # rerank 후 최종 반영 top_k
 RAG_REWRITE_QUERY_COUNT = max(1, int(os.getenv("RAG_REWRITE_QUERY_COUNT", "2")))
 ENABLE_QUERY_REWRITE = os.getenv("ENABLE_QUERY_REWRITE", "true").lower() == "true"
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+MAX_RAG_QUERIES = max(1, int(os.getenv("MAX_RAG_QUERIES", "3")))
+=======
 MAX_RAG_QUERIES = max(1, int(os.getenv("MAX_RAG_QUERIES", "2")))
+>>>>>>> main
 RAG_INCLUDE_ORIGINAL_QUERY = os.getenv("RAG_INCLUDE_ORIGINAL_QUERY", "true").lower() == "true"
 RAG_RETRIEVE_MODE = os.getenv("RAG_RETRIEVE_MODE", "hybrid").lower()
 RAG_BM25_BOOST = float(os.getenv("RAG_BM25_BOOST", "0.025"))
 RAG_KNN_BOOST = float(os.getenv("RAG_KNN_BOOST", "7.98"))
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+RAG_FILTER_DATE_FIELD = os.getenv("RAG_FILTER_DATE_FIELD", "created_time")
+RAG_SIMILARITY_THRESHOLD = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.35"))
+RAG_RECENCY_WEIGHT = float(os.getenv("RAG_RECENCY_WEIGHT", "0.28"))   # 최신성 가중치
+RAG_RECENCY_HALF_LIFE_DAYS = float(os.getenv("RAG_RECENCY_HALF_LIFE_DAYS", "30"))  # 반감기(일)
+RAG_MIN_RECENCY_SCORE = float(os.getenv("RAG_MIN_RECENCY_SCORE", "0.08"))  # 날짜 없을 때 최소점수
+LLM_WORKERS = max(1, int(os.getenv("LLM_WORKERS", os.getenv("LLM_WORKER_COUNT", "4"))))
+LLM_JOB_QUEUE_MAX = max(1, int(os.getenv("LLM_JOB_QUEUE_MAX", "200")))
+LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", os.getenv("LLM_MAX_CONCURRENCY", "4"))))
+LLM_PER_USER_SINGLEFLIGHT = os.getenv("LLM_PER_USER_SINGLEFLIGHT", "true").lower() == "true"
+LLM_RETRY_ATTEMPTS = max(1, int(os.getenv("LLM_RETRY_ATTEMPTS", "3")))
+LLM_RETRY_BASE_DELAY = max(0.1, float(os.getenv("LLM_RETRY_BASE_DELAY", "1.5")))
+=======
 RAG_SIMILARITY_THRESHOLD = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.35"))
 RAG_RECENCY_WEIGHT = float(os.getenv("RAG_RECENCY_WEIGHT", "0.28"))   # 최신성 가중치
 RAG_RECENCY_HALF_LIFE_DAYS = float(os.getenv("RAG_RECENCY_HALF_LIFE_DAYS", "30"))  # 반감기(일)
@@ -117,6 +134,7 @@ RAG_MIN_RECENCY_SCORE = float(os.getenv("RAG_MIN_RECENCY_SCORE", "0.15"))  # 날
 LLM_WORKERS = max(1, int(os.getenv("LLM_WORKERS", os.getenv("LLM_WORKER_COUNT", "4"))))
 LLM_JOB_QUEUE_MAX = max(1, int(os.getenv("LLM_JOB_QUEUE_MAX", "200")))
 LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", "4")))
+>>>>>>> main
 LLM_ALLOWED_USERS_SQL = os.getenv(
     "LLM_ALLOWED_USERS_SQL",
     "select sso_id as senderKnoxId from user"
@@ -448,10 +466,12 @@ def _is_retryable_llm_error(e: Exception) -> bool:
         or "invalid response" in s.lower()
     )
 
-def llm_invoke_with_retry(llm, payload, *, attempts: int = 3, base_delay: float = 1.5):
+def llm_invoke_with_retry(llm, payload, *, attempts: Optional[int] = None, base_delay: Optional[float] = None):
     """
     payload: messages(list) 또는 str 모두 지원
     """
+    attempts = attempts or LLM_RETRY_ATTEMPTS
+    base_delay = base_delay if base_delay is not None else LLM_RETRY_BASE_DELAY
     last_err = None
     for i in range(1, attempts + 1):
         try:
@@ -497,7 +517,11 @@ class RagClient:
         endpoint_map = {
             "bm25": "/retrieve-bm25",
             "knn": "/retrieve-knn",
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+            "hybrid": "/retrieve-hybrid",
+=======
             "hybrid": "/retrieve-rrf",
+>>>>>>> main
             "weighted_hybrid": "/retrieve-weighted-hybrid",
         }
         selected_mode = mode if mode in endpoint_map else "hybrid"
@@ -518,6 +542,10 @@ class RagClient:
                 payload["knn_boost"] = knn_boost
 
         r = self.sess.post(url, data=json.dumps(payload, ensure_ascii=False), timeout=self.timeout)
+        if r.status_code == 404 and selected_mode == "hybrid":
+            # 배포 버전에 따라 retrieve-rrf만 존재할 수 있어 fallback
+            fallback_url = f"{self.base_url}/retrieve-rrf"
+            r = self.sess.post(fallback_url, data=json.dumps(payload, ensure_ascii=False), timeout=self.timeout)
         if 200 <= r.status_code < 300:
             return r.json()
         raise Exception(f"RAG API Error: {r.status_code} - {r.text}")
@@ -538,6 +566,58 @@ def sanitize_query(query: str) -> str:
     return cleaned
 
 
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+def _start_of_day(dt: datetime) -> datetime:
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def build_date_filter_from_question(question: str) -> Optional[Dict[str, Any]]:
+    text = (question or "").strip()
+    if not text:
+        return None
+
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+    today = _start_of_day(now)
+    tomorrow = today + timedelta(days=1)
+    start: Optional[datetime] = None
+    end: Optional[datetime] = None
+
+    if "오늘" in text:
+        start, end = today, tomorrow
+    elif "어제" in text:
+        start, end = today - timedelta(days=1), today
+    elif "이번주" in text:
+        week_start = today - timedelta(days=today.weekday())
+        start, end = week_start, week_start + timedelta(days=7)
+    elif "저번주" in text or "지난주" in text:
+        week_start = today - timedelta(days=today.weekday())
+        start, end = week_start - timedelta(days=7), week_start
+    elif "이번달" in text:
+        month_start = today.replace(day=1)
+        if month_start.month == 12:
+            next_month = month_start.replace(year=month_start.year + 1, month=1)
+        else:
+            next_month = month_start.replace(month=month_start.month + 1)
+        start, end = month_start, next_month
+    else:
+        m = re.search(r"최근\s*(\d+)\s*일", text)
+        if m:
+            days = max(1, int(m.group(1)))
+            start, end = today - timedelta(days=days), tomorrow
+
+    if not start or not end:
+        return None
+
+    return {
+        RAG_FILTER_DATE_FIELD: {
+            "gte": start.isoformat(),
+            "lt": end.isoformat(),
+        }
+    }
+
+
+=======
+>>>>>>> main
 def search_rag_documents(
     query: str,
     indexes: Optional[List[str]] = None,
@@ -772,18 +852,22 @@ def is_rag_result_relevant(question: str, top_docs: List[Dict[str, Any]]) -> boo
 
     title = str(top1.get("title") or "")
     content = str(top1.get("content") or top1.get("merge_title_content") or "")
+    normalized_title = _normalize_text_for_match(title)
     haystack = _normalize_text_for_match(title + " " + content)
 
     keywords = _extract_query_keywords(question)
     keyword_hits = sum(1 for kw in keywords if kw in haystack)
+    title_hits = sum(1 for kw in keywords if kw in normalized_title)
 
-    # FW:/RE: 같은 전달메일성 제목은 약간 보수적으로
     noisy_title = title.strip().upper().startswith(("FW:", "RE:"))
-
     effective_threshold = max(RAG_SIMILARITY_THRESHOLD, RAG_MIN_COMBINED_SCORE)
+
+    if len(keywords) >= 2 and title_hits >= 1:
+        effective_threshold = max(effective_threshold - 0.03, 0.0)
+
     if top_score < effective_threshold:
         return False
-    if keyword_hits < RAG_MIN_KEYWORD_HITS and noisy_title:
+    if noisy_title and keyword_hits < 2:
         return False
     if keywords and keyword_hits == 0:
         return False
@@ -813,7 +897,7 @@ def format_rag_context(documents: List[Dict[str, Any]], max_docs: int = 3) -> st
     return "\n\n".join(context_parts)
 
 
-def retrieve_rag_documents_parallel(queries: List[str], *, top_k: int) -> List[Dict[str, Any]]:
+def retrieve_rag_documents_parallel(queries: List[str], *, top_k: int, rag_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     query_list = [q.strip() for q in queries if q and q.strip()]
     if not query_list:
         return []
@@ -822,7 +906,11 @@ def retrieve_rag_documents_parallel(queries: List[str], *, top_k: int) -> List[D
     max_workers = min(len(query_list), MAX_RAG_QUERIES, 2)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+            executor.submit(search_rag_documents, query, top_k=top_k, mode=RAG_RETRIEVE_MODE, filter=rag_filter): query
+=======
             executor.submit(search_rag_documents, query, top_k=top_k, mode=RAG_RETRIEVE_MODE): query
+>>>>>>> main
             for query in query_list
         }
         for future in as_completed(future_map):
@@ -850,6 +938,7 @@ job_metrics = {
     "minute": "",
     "count": 0,
 }
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
 
 
 def _mark_job_counter():
@@ -862,6 +951,48 @@ def _mark_job_counter():
         return job_metrics["minute"], job_metrics["count"]
 
 
+def _build_user_key(task: Dict[str, Any]) -> str:
+    sender_user_id = (task.get("sender_user_id") or "").strip()
+    sender_knox = (task.get("sender_knox") or "").strip()
+    sender_name = (task.get("sender_name") or "").strip()
+    if sender_user_id:
+        return sender_user_id
+    if sender_knox:
+        return sender_knox
+    if sender_name:
+        return sender_name
+    return str(task.get("chatroom_id"))
+
+
+def reserve_user_singleflight(user_key: str) -> bool:
+    if not LLM_PER_USER_SINGLEFLIGHT:
+        return True
+    with inflight_lock:
+        if inflight.get(user_key):
+            return False
+        inflight[user_key] = True
+        return True
+
+
+def release_user_singleflight(user_key: str):
+    if not LLM_PER_USER_SINGLEFLIGHT:
+        return
+    with inflight_lock:
+        inflight[user_key] = False
+=======
+
+
+def _mark_job_counter():
+    now_minute = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
+    with job_metrics_lock:
+        if job_metrics["minute"] != now_minute:
+            job_metrics["minute"] = now_minute
+            job_metrics["count"] = 0
+        job_metrics["count"] += 1
+        return job_metrics["minute"], job_metrics["count"]
+>>>>>>> main
+
+
 def enqueue_llm_job(job: Dict[str, Any]) -> bool:
     try:
         llm_job_queue.put_nowait(job)
@@ -871,6 +1002,8 @@ def enqueue_llm_job(job: Dict[str, Any]) -> bool:
     except queue.Full:
         print(f"[LLM][{job.get('request_id')}] enqueue failed queue full")
         return False
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+=======
 
 
 def _build_user_key(task: Dict[str, Any]) -> str:
@@ -881,6 +1014,7 @@ def _build_user_key(task: Dict[str, Any]) -> str:
     if sender_name:
         return sender_name
     return str(task.get("chatroom_id"))
+>>>>>>> main
 
 
 def llm_worker_loop(worker_name: str):
@@ -891,6 +1025,8 @@ def llm_worker_loop(worker_name: str):
         dequeued_at = time.time()
         user_key = _build_user_key(task)
 
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+=======
         with inflight_lock:
             if inflight.get(user_key):
                 try:
@@ -902,6 +1038,7 @@ def llm_worker_loop(worker_name: str):
                 continue
             inflight[user_key] = True
 
+>>>>>>> main
         rag_calls = 0
         llm_calls = 0
         used_rag = False
@@ -924,10 +1061,15 @@ def llm_worker_loop(worker_name: str):
         except Exception as e:
             print(f"[{worker_name}][{request_id}] unexpected worker error: {e}")
         finally:
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+            release_user_singleflight(user_key)
+            llm_job_queue.task_done()
+=======
             with inflight_lock:
                 inflight[user_key] = False
             llm_job_queue.task_done()
 
+>>>>>>> main
 
 def start_llm_workers():
     global llm_workers_started
@@ -951,11 +1093,19 @@ def build_search_queries(question: str, llm: ChatOpenAI) -> List[str]:
     if not sanitized_original:
         return []
 
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+    if not ENABLE_QUERY_REWRITE:
+        return [sanitized_original]
+
+    queries: List[str] = [sanitized_original] if RAG_INCLUDE_ORIGINAL_QUERY else []
+    if len(sanitized_original) > 12:
+=======
     queries: List[str] = []
     if RAG_INCLUDE_ORIGINAL_QUERY:
         queries.append(sanitized_original)
 
     if ENABLE_QUERY_REWRITE and len(sanitized_original) > 12:
+>>>>>>> main
         rewritten = rewrite_search_queries(question, llm)
         for item in rewritten:
             sq = sanitize_query(item)
@@ -1005,7 +1155,11 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 SystemMessage(content=fallback_system_prompt),
                 HumanMessage(content=question)
             ]
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+            response = llm_invoke_with_retry(llm, messages)
+=======
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
+>>>>>>> main
             stats["llm_calls"] += 1
             stats["fallback_reason"] = "prefer_general"
             answer = "📋 문서 기반 답변 미적용\n- 일반 지식/실시간 성격의 질문으로 판단했습니다.\n- 아래는 일반 LLM 답변입니다.\n\n" + response.content.strip()
@@ -1013,11 +1167,19 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             return stats
 
         search_queries = build_search_queries(question, llm)
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+        rag_filter = build_date_filter_from_question(question)
         print(f"[RAG] search queries: {search_queries}")
+        if rag_filter:
+            print(f"[RAG] date filter applied: {rag_filter}")
+=======
+        print(f"[RAG] search queries: {search_queries}")
+>>>>>>> main
 
         all_rag_documents = retrieve_rag_documents_parallel(
             search_queries,
             top_k=RAG_NUM_RESULT_DOC,
+            rag_filter=rag_filter,
         )
         stats["rag_calls"] = len(search_queries)
 
@@ -1049,7 +1211,11 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             """
 
             messages = [SystemMessage(content=system_prompt), HumanMessage(content=question)]
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+            response = llm_invoke_with_retry(llm, messages)
+=======
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
+>>>>>>> main
             stats["llm_calls"] += 1
             answer = response.content.strip()
 
@@ -1073,7 +1239,11 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 과도한 추측은 피하고, 불확실한 내용은 단정하지 마세요.
 """
             messages = [SystemMessage(content=fallback_system_prompt), HumanMessage(content=question)]
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+            response = llm_invoke_with_retry(llm, messages)
+=======
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
+>>>>>>> main
             stats["llm_calls"] += 1
 
             reason = "관련 문서를 찾지 못했습니다."
@@ -1140,7 +1310,7 @@ Samsung semiconductor production volume"""
     ]
     
     try:
-        response = llm_invoke_with_retry(llm, messages, attempts=2, base_delay=1.0)
+        response = llm_invoke_with_retry(llm, messages)
         queries_text = response.content.strip()
         queries = []
         for q in queries_text.split('\n'):
@@ -1161,6 +1331,15 @@ Samsung semiconductor production volume"""
 # =========================
 # 3) Action Parsing
 # =========================
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+def _normalize_action_text(text: str) -> str:
+    cleaned = re.sub(r"[\x00-\x1F\x7F]", " ", text or "")
+    cleaned = " ".join(cleaned.strip().split())
+    return cleaned
+
+
+=======
+>>>>>>> main
 def _extract_group_llm_question(txt: str) -> str:
     text = (txt or "").strip()
     if not text:
@@ -1187,39 +1366,64 @@ def parse_action_payload(info: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         parts = chat_msg.split(" -->", 1)
         raw = parts[1].strip()
 
+    normalized_raw = _normalize_action_text(raw)
+
     # 1) 버튼/카드 payload(JSON) 우선
-    if raw.strip().startswith("{"):
+    if normalized_raw.startswith("{"):
         try:
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+            payload = json.loads(normalized_raw)
+            if isinstance(payload, dict) and payload.get("action"):
+                return payload.get("action"), payload
+=======
             payload = json.loads(raw)
             action = payload.get("action", "HOME")
             return action, payload
+>>>>>>> main
         except Exception:
             pass
 
-    txt = raw.strip()
+    txt = normalized_raw
     txt_u = txt.upper()
     chat_type = (info.get("chatType") or "").upper()
 
     # 2) 시스템 트리거 우선
     if txt_u in ("INTRO", "HOME") or txt in ("홈", "/home"):
         return "INTRO", {}
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+
+    # 3) 예약어/바로가기 카드
+    if txt in ("바로가기", "/바로가기", "링크", "/links", "links"):
+        return "QUICK_LINKS", {}
+
+    # 4) SINGLE 단축키 OPEN_URL
+=======
     if txt in ("바로가기", "/바로가기", "링크", "/links", "links"):
         return "QUICK_LINKS", {}
 
     # 3) SINGLE 단축키 OPEN_URL
+>>>>>>> main
     if chat_type == "SINGLE":
         key = txt_u[1:] if txt_u.startswith("/") else txt_u
         title, url = resolve_quick_link(key)
         if url:
             return "OPEN_URL", {"title": title, "url": url}
 
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+    # 5) 명령어
+=======
     # 4) 명령어
+>>>>>>> main
     if txt.startswith("/warn"):
         return "WARN_RUN", {}
     if txt.startswith("/issue"):
         return "ISSUE_FORM", {}
 
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+    # 6) LLM 라우팅
+=======
     # 5) LLM 라우팅
+>>>>>>> main
     if chat_type == "SINGLE":
         if txt.startswith("/ask "):
             return "LLM_CHAT", {"question": txt[5:].strip()}
@@ -2149,16 +2353,38 @@ async def post_message(request: Request):
                 return {"ok": True}
 
             try:
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+                user_key = ""
+                request_id = str(uuid.uuid4())
+                sender_user_id = get_sender_user_id(info) or ""
+                job = {
+                    "chatroom_id": chatroom_id,
+                    "sender_knox": sender_knox,
+                    "sender_user_id": sender_user_id,
+=======
                 request_id = str(uuid.uuid4())
                 job = {
                     "chatroom_id": chatroom_id,
                     "sender_knox": sender_knox,
+>>>>>>> main
                     "sender_name": sender_name,
                     "chat_type": (info.get("chatType") or "").upper(),
                     "question": question,
                     "requested_at": time.time(),
                     "request_id": request_id,
                 }
+<<<<<<< codex/refactor-fastapi-chatbot-processing-structure-xhz76n
+                user_key = _build_user_key(job)
+                if not reserve_user_singleflight(user_key):
+                    chatBot.send_text(chatroom_id, "지금 답변 만드는 중이에요. 잠시 후 다시 질문해 주세요 🙏")
+                    return {"ok": True}
+
+                if not enqueue_llm_job(job):
+                    release_user_singleflight(user_key)
+                    chatBot.send_text(chatroom_id, LLM_QUEUE_FULL_MESSAGE)
+                    return {"ok": True}
+=======
+>>>>>>> main
 
                 try:
                     chatBot.send_text(chatroom_id, "🤔 검색 중입니다. 잠시만 기다려주세요...")
@@ -2171,6 +2397,8 @@ async def post_message(request: Request):
 
                 return {"ok": True}
             except Exception as e:
+                if user_key:
+                    release_user_singleflight(user_key)
                 print(f"[LLM Dispatch Error] {e}")
                 import traceback
                 traceback.print_exc()

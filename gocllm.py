@@ -82,8 +82,8 @@ LLM_GROUP_PREFIXES = [x.strip() for x in os.getenv("LLM_GROUP_PREFIXES", "봇,�
 
 # Conversation memory (SINGLE 전용)
 ENABLE_CONVERSATION_MEMORY = os.getenv("ENABLE_CONVERSATION_MEMORY", "true").lower() == "true"
-MEMORY_MAX_TURNS = max(1, int(os.getenv("MEMORY_MAX_TURNS", "6")))
-MEMORY_MAX_CHARS_PER_MESSAGE = max(50, int(os.getenv("MEMORY_MAX_CHARS_PER_MESSAGE", "500")))
+MEMORY_MAX_TURNS = max(1, int(os.getenv("MEMORY_MAX_TURNS", "4")))
+MEMORY_MAX_CHARS_PER_MESSAGE = max(50, int(os.getenv("MEMORY_MAX_CHARS_PER_MESSAGE", "300")))
 MEMORY_SUMMARIZE_ASSISTANT = os.getenv("MEMORY_SUMMARIZE_ASSISTANT", "true").lower() == "true"
 MEMORY_ONLY_SINGLE = os.getenv("MEMORY_ONLY_SINGLE", "true").lower() == "true"
 MEMORY_RESET_COMMANDS = [x.strip() for x in os.getenv("MEMORY_RESET_COMMANDS", "/reset,기억초기화,대화초기화").split(",") if x.strip()]
@@ -1544,7 +1544,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
             messages.append(HumanMessage(content=question))
             t_llm = time.perf_counter()
-            response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
+            response = llm_invoke_with_retry(llm, messages, attempts=1, base_delay=1.5)
             perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
             stats["llm_calls"] += 1
             stats["fallback_reason"] = "prefer_general"
@@ -1719,7 +1719,33 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             from langchain_core.messages import SystemMessage, HumanMessage
             stats["used_rag"] = True
 
-            system_prompt = f"""
+            if issue_summary_intent:
+                system_prompt = f"""
+당신은 GOC 업무 지원 챗봇입니다. 아래 [검색 문서]만 근거로 아주 간결하게 답하세요.
+
+규칙
+1) 최신 문서일시 순(내림차순)으로 정렬
+2) 문서에 없는 내용은 추측하지 않음
+3) 답변은 짧게: 한줄요약 1개 + 핵심 3개 + 근거 2개
+
+[검색 문서]
+{rag_context}
+
+출력 형식
+📌 한줄 요약
+- 1문장
+
+📂 핵심 이슈(최신순)
+- (문서일시) 내용
+- (문서일시) 내용
+- (문서일시) 내용
+
+📂 근거 문서
+- 제목 | 문서일시 | 링크
+- 제목 | 문서일시 | 링크
+"""
+            else:
+                system_prompt = f"""
                 당신은 GOC 업무 지원 챗봇입니다.
 
                 최우선 규칙
@@ -1763,7 +1789,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             messages.append(HumanMessage(content=f"[RAG context]\n{rag_context}"))
             messages.append(HumanMessage(content=question))
             t_llm = time.perf_counter()
-            response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
+            response = llm_invoke_with_retry(llm, messages, attempts=1, base_delay=1.5)
             perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
             stats["llm_calls"] += 1
             answer = response.content.strip()
@@ -1792,7 +1818,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
             messages.append(HumanMessage(content=question))
             t_llm = time.perf_counter()
-            response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
+            response = llm_invoke_with_retry(llm, messages, attempts=1, base_delay=1.5)
             perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
             stats["llm_calls"] += 1
 
@@ -1879,7 +1905,7 @@ def rewrite_search_queries(question: str, llm: ChatOpenAI, *, memory_text: str =
     ]
 
     try:
-        response = llm_invoke_with_retry(llm, messages, attempts=2, base_delay=1.0)
+        response = llm_invoke_with_retry(llm, messages, attempts=1, base_delay=1.0)
         queries_text = response.content.strip()
         queries = []
         for q in queries_text.split('\n'):

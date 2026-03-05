@@ -962,8 +962,9 @@ MAIL_STRONG_INTENT_KEYWORDS = [
 ]
 GLOSSARY_INTENT_KEYWORDS = ["뭐야", "뜻", "의미", "정의", "약자", "약어", "용어", "무슨 뜻"]
 RECENT_PRIORITY_KEYWORDS = [
-    "최신", "최근", "요즘", "근래", "업데이트", "이번주", "금주", "최근이슈", "최신이슈"
+    "최신", "최근", "요즘", "근래", "업데이트", "이번주", "금주", "최근이슈", "최신이슈", "주요이슈", "이슈정리"
 ]
+ISSUE_SUMMARY_KEYWORDS = ["이슈", "정리", "요약", "현황", "동향", "업데이트", "주요"]
 
 
 def normalize_query_for_search(question: str) -> str:
@@ -987,6 +988,12 @@ def normalize_query_for_search(question: str) -> str:
 def has_strong_mail_intent(question: str) -> bool:
     q_compact = re.sub(r"\s+", "", question or "")
     return any(kw in q_compact for kw in MAIL_STRONG_INTENT_KEYWORDS)
+
+
+def is_issue_summary_intent(question: str) -> bool:
+    q_compact = re.sub(r"\s+", "", question or "")
+    hits = sum(1 for kw in ISSUE_SUMMARY_KEYWORDS if kw in q_compact)
+    return hits >= 2 or ("이슈" in q_compact and any(k in q_compact for k in ("정리", "요약", "현황")))
 
 GENERAL_QUESTION_HINTS = [
     "날씨", "기온", "비와", "눈와", "환율", "주가", "뉴스", "시간", "몇시",
@@ -1155,7 +1162,7 @@ def format_rag_context(documents: List[Dict[str, Any]], max_docs: int = 3) -> st
     return "\n\n".join(context_parts)
 
 
-def retrieve_rag_documents_parallel(queries: List[str], *, top_k: int) -> List[Dict[str, Any]]:
+def retrieve_rag_documents_parallel(queries: List[str], *, top_k: int, indexes: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     query_list = [q.strip() for q in queries if q and q.strip()]
     if not query_list:
         return []
@@ -1164,7 +1171,7 @@ def retrieve_rag_documents_parallel(queries: List[str], *, top_k: int) -> List[D
     max_workers = min(len(query_list), MAX_RAG_QUERIES, 2)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
-            executor.submit(search_rag_documents, query, top_k=top_k, mode=RAG_RETRIEVE_MODE): query
+            executor.submit(search_rag_documents, query, indexes=indexes, top_k=top_k, mode=RAG_RETRIEVE_MODE): query
             for query in query_list
         }
         for future in as_completed(future_map):
@@ -1571,16 +1578,31 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[RAG] search queries: {search_queries}")
 
         time_range = _extract_time_range_from_question(question)
-        prefer_recent_docs = bool(time_range) or should_prioritize_recent_docs(question)
+        issue_summary_intent = is_issue_summary_intent(question)
+        strong_mail_intent = has_strong_mail_intent(question)
+        prefer_recent_docs = bool(time_range) or should_prioritize_recent_docs(question) or issue_summary_intent
         retrieve_top_k = RAG_NUM_RESULT_DOC
         if time_range:
             retrieve_top_k = max(RAG_NUM_RESULT_DOC, RAG_TEMPORAL_NUM_RESULT_DOC)
-        print(f"[RAG] prefer_recent_docs={prefer_recent_docs} time_range={(time_range or {}).get('label') if time_range else 'none'}")
+        elif issue_summary_intent:
+            retrieve_top_k = max(RAG_NUM_RESULT_DOC, 200)
+
+        target_indexes = None
+        if strong_mail_intent or issue_summary_intent:
+            # 이슈/요약류 질문은 glossary 잡음을 줄이기 위해 메일 인덱스 우선
+            target_indexes = [MAIL_INDEX_NAME]
+
+        print(
+            f"[RAG] prefer_recent_docs={prefer_recent_docs} issue_summary_intent={issue_summary_intent} "
+            f"strong_mail_intent={strong_mail_intent} time_range={(time_range or {}).get('label') if time_range else 'none'} "
+            f"top_k={retrieve_top_k} indexes={target_indexes or 'default'}"
+        )
 
         t_rag = time.perf_counter()
         all_rag_documents = retrieve_rag_documents_parallel(
             search_queries,
             top_k=retrieve_top_k,
+            indexes=target_indexes,
         )
         perf["rag_fetch_ms"] = (time.perf_counter() - t_rag) * 1000
         stats["rag_calls"] = len(search_queries)

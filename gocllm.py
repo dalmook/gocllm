@@ -103,6 +103,7 @@ RAG_PERMISSION_GROUPS = os.getenv("RAG_PERMISSION_GROUPS", "rag-public")
 # RAG 후보는 top6까지만 가져오고, 최종 컨텍스트는 top3만 사용
 RAG_NUM_RESULT_DOC = int(os.getenv("RAG_NUM_RESULT_DOC", "6"))   # vector search top_k
 RAG_CONTEXT_DOCS = int(os.getenv("RAG_CONTEXT_DOCS", "3"))       # rerank 후 최종 반영 top_k
+RAG_TEMPORAL_NUM_RESULT_DOC = int(os.getenv("RAG_TEMPORAL_NUM_RESULT_DOC", "40"))  # 시간조건 질문일 때 후보 확장
 RAG_REWRITE_QUERY_COUNT = max(1, int(os.getenv("RAG_REWRITE_QUERY_COUNT", "2")))
 ENABLE_QUERY_REWRITE = os.getenv("ENABLE_QUERY_REWRITE", "true").lower() == "true"
 MAX_RAG_QUERIES = max(1, int(os.getenv("MAX_RAG_QUERIES", "2")))
@@ -678,6 +679,115 @@ def _extract_doc_datetime(doc: Dict[str, Any]) -> Optional[datetime]:
             if dt:
                 return dt
     return None
+
+
+def _get_week_range(base_dt: datetime, week_offset: int = 0) -> Tuple[datetime, datetime]:
+    tz = ZoneInfo("Asia/Seoul")
+    if base_dt.tzinfo is None:
+        base_dt = base_dt.replace(tzinfo=tz)
+    base_dt = base_dt.astimezone(tz)
+    monday = (base_dt - timedelta(days=base_dt.weekday())).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    start = monday + timedelta(days=7 * week_offset)
+    end = start + timedelta(days=7)
+    return start, end
+
+
+def _get_month_range(year: int, month: int) -> Optional[Tuple[datetime, datetime]]:
+    if month < 1 or month > 12:
+        return None
+    tz = ZoneInfo("Asia/Seoul")
+    start = datetime(year, month, 1, tzinfo=tz)
+    if month == 12:
+        end = datetime(year + 1, 1, 1, tzinfo=tz)
+    else:
+        end = datetime(year, month + 1, 1, tzinfo=tz)
+    return start, end
+
+
+def _extract_time_range_from_question(question: str) -> Optional[Dict[str, Any]]:
+    q_raw = (question or "")
+    q = q_raw.replace(" ", "")
+    if not q:
+        return None
+
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+
+    if any(token in q for token in ("이번주", "금주", "이번주간")):
+        start, end = _get_week_range(now, week_offset=0)
+        return {"label": "이번주", "start": start, "end": end}
+
+    if any(token in q for token in ("저번주", "지난주", "전주", "지난주간")):
+        start, end = _get_week_range(now, week_offset=-1)
+        return {"label": "저번주", "start": start, "end": end}
+
+    if "이번달" in q or "금월" in q:
+        month_range = _get_month_range(now.year, now.month)
+        if month_range:
+            start, end = month_range
+            return {"label": "이번달", "start": start, "end": end}
+
+    if "저번달" in q or "지난달" in q or "전월" in q:
+        year = now.year
+        month = now.month - 1
+        if month == 0:
+            year -= 1
+            month = 12
+        month_range = _get_month_range(year, month)
+        if month_range:
+            start, end = month_range
+            return {"label": "저번달", "start": start, "end": end}
+
+    m = re.search(r"작년\s*(\d{1,2})\s*월", q_raw)
+    if m:
+        target_month = int(m.group(1))
+        month_range = _get_month_range(now.year - 1, target_month)
+        if month_range:
+            start, end = month_range
+            return {"label": f"작년 {target_month}월", "start": start, "end": end}
+
+    m = re.search(r"(올해|금년|당해)\s*(\d{1,2})\s*월", q_raw)
+    if m:
+        target_month = int(m.group(2))
+        month_range = _get_month_range(now.year, target_month)
+        if month_range:
+            start, end = month_range
+            return {"label": f"올해 {target_month}월", "start": start, "end": end}
+
+    m = re.search(r"(\d{4})\s*년\s*(\d{1,2})\s*월", q_raw)
+    if m:
+        target_year = int(m.group(1))
+        target_month = int(m.group(2))
+        month_range = _get_month_range(target_year, target_month)
+        if month_range:
+            start, end = month_range
+            return {"label": f"{target_year}년 {target_month}월", "start": start, "end": end}
+
+    return None
+
+
+def _filter_docs_by_datetime_range(
+    documents: List[Dict[str, Any]],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> List[Dict[str, Any]]:
+    filtered: List[Dict[str, Any]] = []
+    for doc in documents:
+        dt = _extract_doc_datetime(doc)
+        if not dt:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+        dt = dt.astimezone(ZoneInfo("Asia/Seoul"))
+        if start_dt <= dt < end_dt:
+            filtered.append(doc)
+    return filtered
+
+
 def rerank_rag_documents(documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not documents:
         return []
@@ -1015,11 +1125,34 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         search_queries = build_search_queries(question, llm)
         print(f"[RAG] search queries: {search_queries}")
 
+        time_range = _extract_time_range_from_question(question)
+        retrieve_top_k = RAG_NUM_RESULT_DOC
+        if time_range:
+            retrieve_top_k = max(RAG_NUM_RESULT_DOC, RAG_TEMPORAL_NUM_RESULT_DOC)
+
         all_rag_documents = retrieve_rag_documents_parallel(
             search_queries,
-            top_k=RAG_NUM_RESULT_DOC,
+            top_k=retrieve_top_k,
         )
         stats["rag_calls"] = len(search_queries)
+
+        if time_range:
+            ranged_docs = _filter_docs_by_datetime_range(
+                all_rag_documents,
+                time_range["start"],
+                time_range["end"],
+            )
+            if ranged_docs:
+                print(
+                    f"[RAG] 기간 필터 적용: {time_range['label']} "
+                    f"{time_range['start']}~{time_range['end']} docs={len(ranged_docs)}"
+                )
+                all_rag_documents = ranged_docs
+            else:
+                print(
+                    f"[RAG] 기간 필터 결과 없음, 원본 결과 사용: {time_range['label']} "
+                    f"{time_range['start']}~{time_range['end']}"
+                )
 
         reranked_docs = rerank_rag_documents(all_rag_documents)[:RAG_NUM_RESULT_DOC]
         top_docs = reranked_docs[:RAG_CONTEXT_DOCS]

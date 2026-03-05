@@ -7,6 +7,7 @@ import time
 import math
 import uuid
 import re
+import sqlite3
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -78,6 +79,15 @@ ENABLE_RECALL = os.getenv("ENABLE_RECALL", "false").lower() == "true"
 LLM_CHAT_DEFAULT_MODE = os.getenv("LLM_CHAT_DEFAULT_MODE", "single")
 LLM_GROUP_MENTION_TEXT = os.getenv("LLM_GROUP_MENTION_TEXT", "@공급망 챗봇")
 LLM_GROUP_PREFIXES = [x.strip() for x in os.getenv("LLM_GROUP_PREFIXES", "봇,챗봇").split(",") if x.strip()]
+
+# Conversation memory (SINGLE 전용)
+ENABLE_CONVERSATION_MEMORY = os.getenv("ENABLE_CONVERSATION_MEMORY", "true").lower() == "true"
+MEMORY_MAX_TURNS = max(1, int(os.getenv("MEMORY_MAX_TURNS", "6")))
+MEMORY_MAX_CHARS_PER_MESSAGE = max(50, int(os.getenv("MEMORY_MAX_CHARS_PER_MESSAGE", "500")))
+MEMORY_SUMMARIZE_ASSISTANT = os.getenv("MEMORY_SUMMARIZE_ASSISTANT", "true").lower() == "true"
+MEMORY_ONLY_SINGLE = os.getenv("MEMORY_ONLY_SINGLE", "true").lower() == "true"
+MEMORY_RESET_COMMANDS = [x.strip() for x in os.getenv("MEMORY_RESET_COMMANDS", "/reset,기억초기화,대화초기화").split(",") if x.strip()]
+MEMORY_DB_PATH = os.getenv("MEMORY_DB_PATH", "")
 
 # =========================
 # LLM API Configuration (GaussO4)
@@ -1158,6 +1168,122 @@ job_metrics = {
 }
 
 
+def _memory_db_path() -> str:
+    if MEMORY_DB_PATH:
+        return MEMORY_DB_PATH
+    store_db_path = getattr(store, "DB_PATH", "")
+    if store_db_path:
+        return store_db_path
+    return os.path.join(os.getcwd(), "gocllm.db")
+
+
+def init_conversation_memory_db():
+    if not ENABLE_CONVERSATION_MEMORY:
+        return
+    with sqlite3.connect(_memory_db_path()) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope_id TEXT NOT NULL,
+                room_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_memory_scope_id_id ON chat_memory(scope_id, id)")
+        conn.commit()
+
+
+def _memory_enabled_for_chat(chat_type: str) -> bool:
+    if not ENABLE_CONVERSATION_MEMORY:
+        return False
+    if MEMORY_ONLY_SINGLE and (chat_type or "").upper() != "SINGLE":
+        return False
+    return True
+
+
+def _is_context_dependent_question(question: str) -> bool:
+    q = (question or "").strip().lower()
+    if not q:
+        return False
+    patterns = ["그거", "아까", "이전", "방금", "담당자는", "왜", "언제", "뭐야", "그게", "그건", "그 내용"]
+    return any(p in q for p in patterns) or len(q) <= 8
+
+
+def _trim_memory_content(role: str, content: str) -> str:
+    text = re.sub(r"\s+", " ", (content or "")).strip()
+    if role == "assistant" and MEMORY_SUMMARIZE_ASSISTANT:
+        text = text[: MEMORY_MAX_CHARS_PER_MESSAGE * 2]
+    if len(text) <= MEMORY_MAX_CHARS_PER_MESSAGE:
+        return text
+    return text[:MEMORY_MAX_CHARS_PER_MESSAGE] + " ..."
+
+
+def save_conversation_memory(*, scope_id: str, room_id: str, user_id: str, role: str, content: str, chat_type: str):
+    if not _memory_enabled_for_chat(chat_type):
+        return
+    if role not in ("user", "assistant"):
+        return
+    trimmed = _trim_memory_content(role, content)
+    if not trimmed:
+        return
+    with sqlite3.connect(_memory_db_path()) as conn:
+        conn.execute(
+            "INSERT INTO chat_memory(scope_id, room_id, user_id, role, content) VALUES (?, ?, ?, ?, ?)",
+            (str(scope_id), str(room_id), str(user_id or ""), role, trimmed),
+        )
+        conn.execute(
+            """
+            DELETE FROM chat_memory
+            WHERE scope_id = ? AND id NOT IN (
+                SELECT id FROM chat_memory WHERE scope_id = ? ORDER BY id DESC LIMIT ?
+            )
+            """,
+            (str(scope_id), str(scope_id), MEMORY_MAX_TURNS),
+        )
+        conn.commit()
+
+
+def load_conversation_memory(*, scope_id: str, chat_type: str) -> List[Dict[str, str]]:
+    if not _memory_enabled_for_chat(chat_type):
+        return []
+    with sqlite3.connect(_memory_db_path()) as conn:
+        rows = conn.execute(
+            "SELECT role, content FROM chat_memory WHERE scope_id = ? ORDER BY id DESC LIMIT ?",
+            (str(scope_id), MEMORY_MAX_TURNS),
+        ).fetchall()
+    rows = list(reversed(rows))
+    return [{"role": r[0], "content": r[1]} for r in rows]
+
+
+def clear_conversation_memory(scope_id: str):
+    if not ENABLE_CONVERSATION_MEMORY:
+        return
+    with sqlite3.connect(_memory_db_path()) as conn:
+        conn.execute("DELETE FROM chat_memory WHERE scope_id = ?", (str(scope_id),))
+        conn.commit()
+
+
+def build_memory_text(memory_messages: List[Dict[str, str]]) -> str:
+    if not memory_messages:
+        return ""
+    lines = []
+    total_chars = 0
+    hard_limit = MEMORY_MAX_TURNS * MEMORY_MAX_CHARS_PER_MESSAGE
+    for m in memory_messages:
+        role = "사용자" if m.get("role") == "user" else "어시스턴트"
+        line = f"- {role}: {(m.get('content') or '').strip()}"
+        if total_chars + len(line) > hard_limit:
+            break
+        lines.append(line)
+        total_chars += len(line)
+    return "\n".join(lines)
+
+
 def _mark_job_counter():
     now_minute = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
     with job_metrics_lock:
@@ -1212,6 +1338,10 @@ def llm_worker_loop(worker_name: str):
         llm_calls = 0
         used_rag = False
         fallback_reason = ""
+        memory_hit = False
+        memory_message_count = 0
+        memory_prompt_chars = 0
+        rewrite_used_memory = False
         try:
             with llm_sem:
                 minute, minute_count = _mark_job_counter()
@@ -1220,12 +1350,17 @@ def llm_worker_loop(worker_name: str):
                 llm_calls = int(stats.get("llm_calls", 0))
                 used_rag = bool(stats.get("used_rag", False))
                 fallback_reason = str(stats.get("fallback_reason", ""))
+                memory_hit = bool(stats.get("memory_hit", False))
+                memory_message_count = int(stats.get("memory_message_count", 0))
+                memory_prompt_chars = int(stats.get("memory_prompt_chars", 0))
+                rewrite_used_memory = bool(stats.get("rewrite_used_memory", False))
                 total_latency = time.time() - requested_at
                 queue_wait = dequeued_at - requested_at
                 print(
                     f"[{worker_name}][{request_id}] done queue_wait={queue_wait:.2f}s total={total_latency:.2f}s "
                     f"rag_calls={rag_calls} llm_calls={llm_calls} used_rag={used_rag} "
-                    f"fallback_reason={fallback_reason} rpm={minute_count}@{minute}"
+                    f"memory_hit={memory_hit} memory_message_count={memory_message_count} memory_prompt_chars={memory_prompt_chars} "
+                    f"rewrite_used_memory={rewrite_used_memory} fallback_reason={fallback_reason} rpm={minute_count}@{minute}"
                 )
         except Exception as e:
             print(f"[{worker_name}][{request_id}] unexpected worker error: {e}")
@@ -1273,7 +1408,7 @@ def generate_deterministic_query_variants(question: str) -> List[str]:
                 variants.append(f"{lead} 파트 " + " ".join(parts[1:]))
 
     return [v for v in variants if v and v != base]
-def build_search_queries(question: str, llm: ChatOpenAI) -> List[str]:
+def build_search_queries(question: str, llm: ChatOpenAI, *, memory_text: str = "", use_memory_for_rewrite: bool = False) -> List[str]:
     normalized = normalize_query_for_search(question)
     sanitized_original = sanitize_query(normalized)
     if not sanitized_original:
@@ -1299,7 +1434,7 @@ def build_search_queries(question: str, llm: ChatOpenAI) -> List[str]:
         return (queries or [sanitized_original])[:MAX_RAG_QUERIES]
 
     if len(sanitized_original) > 12 and len(queries) < MAX_RAG_QUERIES:
-        rewritten = rewrite_search_queries(question, llm)
+        rewritten = rewrite_search_queries(question, llm, memory_text=memory_text, use_memory=use_memory_for_rewrite)
         for item in rewritten:
             sq = sanitize_query(normalize_query_for_search(item))
             if sq and sq not in queries:
@@ -1314,6 +1449,8 @@ def build_search_queries(question: str, llm: ChatOpenAI) -> List[str]:
 
 def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
     chatroom_id = int(task["chatroom_id"])
+    chat_type = (task.get("chat_type") or "").upper()
+    scope_id = str(task.get("scope_id") or chatroom_id)
     question = (task.get("question") or "").strip()
     sender_knox = task.get("sender_knox") or ""
     stats = {
@@ -1321,11 +1458,26 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         "llm_calls": 0,
         "used_rag": False,
         "fallback_reason": "",
+        "memory_hit": False,
+        "memory_message_count": 0,
+        "memory_prompt_chars": 0,
+        "rewrite_used_memory": False,
     }
 
     try:
         user_id = sender_knox if sender_knox else "bot"
         llm = create_llm_chatbot(user_id)
+
+        memory_messages = load_conversation_memory(scope_id=scope_id, chat_type=chat_type)
+        memory_text = build_memory_text(memory_messages)
+        memory_hit = bool(memory_messages)
+        use_memory_for_rewrite = memory_hit and _is_context_dependent_question(question)
+        memory_chars = len(memory_text)
+        stats["memory_hit"] = memory_hit
+        stats["memory_message_count"] = len(memory_messages)
+        stats["memory_prompt_chars"] = memory_chars
+        stats["rewrite_used_memory"] = use_memory_for_rewrite
+        print(f"[MEMORY] hit={memory_hit} message_count={len(memory_messages)} prompt_chars={memory_chars} use_in_rewrite={use_memory_for_rewrite}")
 
         prefer_general = should_prefer_general_llm(question)
         if prefer_general:
@@ -1346,15 +1498,23 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 ⚠️ 참고
 - 이번 답변은 문서 기반이 아니라 일반 답변임을 짧게 안내
 """
-            messages = [
-                SystemMessage(content=fallback_system_prompt),
-                HumanMessage(content=question)
-            ]
+            messages = [SystemMessage(content=fallback_system_prompt)]
+            if memory_text:
+                messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
+            messages.append(HumanMessage(content=question))
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
             stats["llm_calls"] += 1
             stats["fallback_reason"] = "prefer_general"
             answer = "📋 문서 기반 답변 미적용\n- 일반 지식/실시간 성격의 질문으로 판단했습니다.\n- 아래는 일반 LLM 답변입니다.\n\n" + response.content.strip()
             chatBot.send_text(chatroom_id, f"🤖 {answer}")
+            save_conversation_memory(
+                scope_id=scope_id,
+                room_id=str(chatroom_id),
+                user_id=sender_knox,
+                role="assistant",
+                content=answer,
+                chat_type=chat_type,
+            )
             return stats
 
         normalized_query = normalize_query_for_search(question)
@@ -1365,7 +1525,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[RAG] glossary_intent={glossary_intent}")
         print(f"[RAG] force_glossary={force_glossary}")
 
-        search_queries = build_search_queries(question, llm)
+        search_queries = build_search_queries(question, llm, memory_text=memory_text, use_memory_for_rewrite=use_memory_for_rewrite)
         print(f"[RAG] search queries: {search_queries}")
 
         time_range = _extract_time_range_from_question(question)
@@ -1505,7 +1665,11 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 🔗 이슈지 바로가기 👉 https://go/issueG
             """
 
-            messages = [SystemMessage(content=system_prompt), HumanMessage(content=question)]
+            messages = [SystemMessage(content=system_prompt)]
+            if memory_text:
+                messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
+            messages.append(HumanMessage(content=f"[RAG context]\n{rag_context}"))
+            messages.append(HumanMessage(content=question))
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
             stats["llm_calls"] += 1
             answer = response.content.strip()
@@ -1529,7 +1693,10 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 이번 질문은 문서 검색 결과가 없거나 관련성이 낮아 일반 LLM 답변으로 안내합니다.
 과도한 추측은 피하고, 불확실한 내용은 단정하지 마세요.
 """
-            messages = [SystemMessage(content=fallback_system_prompt), HumanMessage(content=question)]
+            messages = [SystemMessage(content=fallback_system_prompt)]
+            if memory_text:
+                messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
+            messages.append(HumanMessage(content=question))
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
             stats["llm_calls"] += 1
 
@@ -1546,6 +1713,14 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             f"fallback_reason={stats.get('fallback_reason','')}"
         )
         chatBot.send_text(chatroom_id, f"🤖 {answer}")
+        save_conversation_memory(
+            scope_id=scope_id,
+            room_id=str(chatroom_id),
+            user_id=sender_knox,
+            role="assistant",
+            content=answer,
+            chat_type=chat_type,
+        )
         return stats
 
     except Exception as e:
@@ -1563,43 +1738,38 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 def process_llm_chat_background(task: Dict[str, Any]) -> Dict[str, Any]:
     return _process_llm_chat_background_impl(task)
 
-def rewrite_search_queries(question: str, llm: ChatOpenAI) -> List[str]:
+def rewrite_search_queries(question: str, llm: ChatOpenAI, *, memory_text: str = "", use_memory: bool = False) -> List[str]:
     """
     LLM을 사용하여 질문을 검색 최적화 질의로 재작성
-    
+
     Args:
         question: 사용자 질문
         llm: LLM 인스턴스
-    
+
     Returns:
         재작성된 검색 질의 목록 (최대 2개)
     """
     from langchain_core.messages import SystemMessage, HumanMessage
-    
+
     system_prompt = """사용자의 질문을 문서 검색에 최적화된 질의로 재작성하세요.
 다음 조건을 반영하여 정확히 2개의 검색 질의를 생성하세요:
 1. 핵심 키워드 추출
 2. 동의어/업무용 표현 보강
 3. 너무 긴 문장은 짧은 검색 질의로 축약
+4. 질문이 문맥 의존적(예: 그거, 아까 말한거, 담당자는?, 왜?, 언제?)이면 최근 대화 문맥을 반영해 독립적인 질의로 확장
 
 각 질의는 줄바꿈으로 구분하세요. 다른 설명은 하지 마세요.
+"""
 
-예시:
-질문: "Apple의 공급망 투입 현황 알려줘"
-답변:
-Apple 공급망 투입 현황
-Apple supply chain investment
+    rewrite_input = question
+    if use_memory and memory_text:
+        rewrite_input = f"최근 대화:\n{memory_text}\n\n현재 질문:\n{question}"
 
-질문: "삼성전자의 최신 반도체 생산량은?"
-답변:
-삼성전자 반도체 생산량
-Samsung semiconductor production volume"""
-    
     messages = [
         SystemMessage(content=system_prompt),
-        HumanMessage(content=question)
+        HumanMessage(content=rewrite_input)
     ]
-    
+
     try:
         response = llm_invoke_with_retry(llm, messages, attempts=2, base_delay=1.0)
         queries_text = response.content.strip()
@@ -1682,6 +1852,8 @@ def parse_action_payload(info: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 
     # 5) LLM 라우팅
     if chat_type == "SINGLE":
+        if txt in MEMORY_RESET_COMMANDS:
+            return "LLM_CHAT", {"question": txt}
         if txt.startswith("/ask "):
             return "LLM_CHAT", {"question": txt[5:].strip()}
         if txt.startswith("질문:"):
@@ -2522,6 +2694,7 @@ def job_knox_reconnect():
 def on_startup():
     global chatBot
     store.init_db()
+    init_conversation_memory_db()
     start_llm_workers()
     print(f"[startup] LLM workers started: workers={LLM_WORKERS}, max_concurrent={LLM_MAX_CONCURRENT}, queue_max={LLM_JOB_QUEUE_MAX}")
 
@@ -2608,13 +2781,34 @@ async def post_message(request: Request):
                 chatBot.send_text(chatroom_id, "질문 내용이 비어있습니다. /ask 질문내용 또는 질문:내용 형식으로 입력해주세요.")
                 return {"ok": True}
 
+            chat_type = (info.get("chatType") or "").upper()
+            scope_id = str(chatroom_id)
+            if question in MEMORY_RESET_COMMANDS:
+                clear_conversation_memory(scope_id)
+                chatBot.send_text(chatroom_id, "🧹 해당 1:1 대화 메모리를 초기화했습니다.")
+                return {"ok": True}
+
+            skip_memory_save = {
+                "INTRO", "HOME", "", "/home", "홈"
+            }
+            if question not in skip_memory_save:
+                save_conversation_memory(
+                    scope_id=scope_id,
+                    room_id=str(chatroom_id),
+                    user_id=sender_knox,
+                    role="user",
+                    content=question,
+                    chat_type=chat_type,
+                )
+
             try:
                 request_id = str(uuid.uuid4())
                 job = {
                     "chatroom_id": chatroom_id,
                     "sender_knox": sender_knox,
                     "sender_name": sender_name,
-                    "chat_type": (info.get("chatType") or "").upper(),
+                    "chat_type": chat_type,
+                    "scope_id": scope_id,
                     "question": question,
                     "requested_at": time.time(),
                     "request_id": request_id,

@@ -29,6 +29,10 @@
 
 🔗 이슈지 바로가기 👉 https://go/이슈지
 
+{"doc_id":"MAIL::20260304041556epcms2p4dfa6f42f609a326cd0e8ba7496363ebe_epcms2p4","chunk_id":"MAIL::20260304041556epcms2p4dfa6f42f609a326cd0e8ba7496363ebe_epcms2p4_000000","title":"■3/5(목) Global운영팀 일일근태","merge_title_content":"■3/5(목) Global운영팀 일일근태 [SEP] [문서 정보]\n\nBULLET::- 제목: ■3/5(목) Global운영팀 일일근태\nBULLET::- 최초 작성일: 2026-03-05\nBULLET::- 마지막 수정일: 2026-03-05\nBULLET::- URL : https://confluence.samsungds.net/pages/viewpage.action?pageId=3349871062\nBULLET::- FILE_URL : https://s3drive.samsungds.net/?namespace=org-scm_group-mem&bucket=goc_mail_1&folderPrefix=mail_eml%2F2026-03-05%2F20260304041556epcms2p4dfa6f42f609a326cd0e8ba7496363ebeBCC20260304223012813%2F\nBULLET::- S3 URI: s3://goc_mail_1/mail_eml/2026-03-05/20260304041556epcms2p4dfa6f42f609a326cd0e8ba7496363ebeBCC20260304223012813/■3_5(목) Global운영팀 일일근태_20260305_073000_4c1b3b3a.eml\nBULLET::- S3 KEY: mail_eml/2026-03-05/20260304041556epcms2p4dfa6f42f609a326cd0e8ba7496363ebeBCC20260304223012813/■3_5(목) Global운영팀","permission_groups":["rag-public"],"creator_id":"sungmook.cho","created_time":"2026-03-05T00:00:00.000+09:00"}
+
+청크 : CHUNK = ChunkFactor(logic="fixed_size", chunk_size=600, chunk_overlap=120, separator=" ")
+
 [RAG Search Error] Index: rp-gocinfo-mail, Error: RAG API Error: no available retrieval endpoint (bm25 not found)
 Traceback (most recent call last):
   File "H:\python_pjt\main.py", line 709, in search_rag_documents

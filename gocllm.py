@@ -114,6 +114,7 @@ RAG_PERMISSION_GROUPS = os.getenv("RAG_PERMISSION_GROUPS", "rag-public")
 RAG_NUM_RESULT_DOC = int(os.getenv("RAG_NUM_RESULT_DOC", "3"))   # vector search top_k (latency-tuned default)
 RAG_CONTEXT_DOCS = int(os.getenv("RAG_CONTEXT_DOCS", "2"))       # rerank 후 최종 반영 top_k (latency-tuned default)
 RAG_TEMPORAL_NUM_RESULT_DOC = int(os.getenv("RAG_TEMPORAL_NUM_RESULT_DOC", "20"))  # 시간조건 질문일 때 후보 확장
+RAG_API_MAX_NUM_RESULT_DOC = int(os.getenv("RAG_API_MAX_NUM_RESULT_DOC", "100"))
 RAG_REWRITE_QUERY_COUNT = max(1, int(os.getenv("RAG_REWRITE_QUERY_COUNT", "1")))
 ENABLE_QUERY_REWRITE = os.getenv("ENABLE_QUERY_REWRITE", "false").lower() == "true"
 MAX_RAG_QUERIES = max(1, int(os.getenv("MAX_RAG_QUERIES", "1")))
@@ -589,8 +590,12 @@ def search_rag_documents(
     print(f"[RAG Search] Query(sanitized): {sanitized_query}")
     print(f"[RAG Search] Indexes: {indexes}")
     print(f"[RAG Search] Base URL: {RAG_BASE_URL}")
-    num_result_doc = top_k or RAG_NUM_RESULT_DOC
-    print(f"[RAG Search] Num Result Doc: {num_result_doc}")
+    requested_top_k = top_k or RAG_NUM_RESULT_DOC
+    num_result_doc = min(max(1, int(requested_top_k)), RAG_API_MAX_NUM_RESULT_DOC)
+    if num_result_doc != requested_top_k:
+        print(f"[RAG Search] Num Result Doc capped: requested={requested_top_k} capped={num_result_doc} (api_max={RAG_API_MAX_NUM_RESULT_DOC})")
+    else:
+        print(f"[RAG Search] Num Result Doc: {num_result_doc}")
     
     rag_client = create_rag_client()
     all_results = []
@@ -1585,7 +1590,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         if time_range:
             retrieve_top_k = max(RAG_NUM_RESULT_DOC, RAG_TEMPORAL_NUM_RESULT_DOC)
         elif issue_summary_intent:
-            retrieve_top_k = max(RAG_NUM_RESULT_DOC, 200)
+            retrieve_top_k = max(RAG_NUM_RESULT_DOC, RAG_API_MAX_NUM_RESULT_DOC)
 
         target_indexes = None
         if strong_mail_intent or issue_summary_intent:

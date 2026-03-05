@@ -678,6 +678,61 @@ def _extract_doc_datetime(doc: Dict[str, Any]) -> Optional[datetime]:
             if dt:
                 return dt
     return None
+
+
+def _get_week_range(base_dt: datetime, week_offset: int = 0) -> Tuple[datetime, datetime]:
+    tz = ZoneInfo("Asia/Seoul")
+    if base_dt.tzinfo is None:
+        base_dt = base_dt.replace(tzinfo=tz)
+    base_dt = base_dt.astimezone(tz)
+    monday = (base_dt - timedelta(days=base_dt.weekday())).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    start = monday + timedelta(days=7 * week_offset)
+    end = start + timedelta(days=7)
+    return start, end
+
+
+def _extract_week_range_from_question(question: str) -> Optional[Dict[str, Any]]:
+    q = (question or "").replace(" ", "")
+    if not q:
+        return None
+
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+    # 이번주/금주/이번 주
+    if any(token in q for token in ("이번주", "금주", "이번주간")):
+        start, end = _get_week_range(now, week_offset=0)
+        return {"label": "이번주", "start": start, "end": end}
+
+    # 저번주/지난주/전주
+    if any(token in q for token in ("저번주", "지난주", "전주", "지난주간")):
+        start, end = _get_week_range(now, week_offset=-1)
+        return {"label": "저번주", "start": start, "end": end}
+
+    return None
+
+
+def _filter_docs_by_datetime_range(
+    documents: List[Dict[str, Any]],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> List[Dict[str, Any]]:
+    filtered: List[Dict[str, Any]] = []
+    for doc in documents:
+        dt = _extract_doc_datetime(doc)
+        if not dt:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+        dt = dt.astimezone(ZoneInfo("Asia/Seoul"))
+        if start_dt <= dt < end_dt:
+            filtered.append(doc)
+    return filtered
+
+
 def rerank_rag_documents(documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not documents:
         return []
@@ -1020,6 +1075,25 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             top_k=RAG_NUM_RESULT_DOC,
         )
         stats["rag_calls"] = len(search_queries)
+
+        week_range = _extract_week_range_from_question(question)
+        if week_range:
+            week_docs = _filter_docs_by_datetime_range(
+                all_rag_documents,
+                week_range["start"],
+                week_range["end"],
+            )
+            if week_docs:
+                print(
+                    f"[RAG] 주차 필터 적용: {week_range['label']} "
+                    f"{week_range['start']}~{week_range['end']} docs={len(week_docs)}"
+                )
+                all_rag_documents = week_docs
+            else:
+                print(
+                    f"[RAG] 주차 필터 결과 없음, 원본 결과 사용: {week_range['label']} "
+                    f"{week_range['start']}~{week_range['end']}"
+                )
 
         reranked_docs = rerank_rag_documents(all_rag_documents)[:RAG_NUM_RESULT_DOC]
         top_docs = reranked_docs[:RAG_CONTEXT_DOCS]

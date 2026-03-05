@@ -119,7 +119,7 @@ LLM_JOB_QUEUE_MAX = max(1, int(os.getenv("LLM_JOB_QUEUE_MAX", "200")))
 LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", "4")))
 LLM_ALLOWED_USERS_SQL = os.getenv(
     "LLM_ALLOWED_USERS_SQL",
-    "select sso_id as senderKnoxId from user"
+    "SELECT SSO_ID FROM SCM_WP.T_T_FOR_MASTER A WHERE 1=1 AND a.sso_id = 'sungmook.cho' AND A.DEPT_NAME LIKE '%SCM%메모리%' and a.POSITION_CODE is not null AND A.SSO_ID NOT IN ('SCM.RPA','SCM 봇','메모리STO2','메모리 STO','dalbong.chatbot01', 'dalbongbot01', 'dalbong.bot01', 'command.center', 'thatcoolguy')"
 )
 LLM_ALLOWED_USERS_CACHE_TTL_SEC = max(0, int(os.getenv("LLM_ALLOWED_USERS_CACHE_TTL_SEC", "300")))
 
@@ -1045,7 +1045,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             📂 문서 기반 답변
             💡 AI 의견
             📂 근거 문서
-            ⚠️ 주의
+            ⚠️ 주의            
             """
 
             messages = [SystemMessage(content=system_prompt), HumanMessage(content=question)]

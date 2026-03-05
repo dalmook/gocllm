@@ -1195,6 +1195,8 @@ LLM_BUSY_MESSAGE = "지금 답변 생성 중입니다. 완료 후 다시 질문�
 LLM_QUEUE_FULL_MESSAGE = "요청이 많아 잠시 후 다시 시도해주세요."
 llm_job_queue: "queue.Queue[dict]" = queue.Queue(maxsize=LLM_JOB_QUEUE_MAX)
 llm_task_state_lock = threading.Lock()
+llm_job_state_lock = threading.Lock()
+llm_job_state: Dict[str, str] = {}  # queued|running|done|failed
 inflight: Dict[str, bool] = {}
 inflight_lock = threading.Lock()
 llm_sem = threading.Semaphore(LLM_MAX_CONCURRENT)
@@ -1336,6 +1338,10 @@ def enqueue_llm_job(job: Dict[str, Any]) -> bool:
     try:
         llm_job_queue.put_nowait(job)
         qsize = llm_job_queue.qsize()
+        req_id = str(job.get("request_id") or "")
+        if req_id:
+            with llm_job_state_lock:
+                llm_job_state[req_id] = "queued"
         print(f"[LLM][{job.get('request_id')}] enqueue ok qsize={qsize}")
         return True
     except queue.Full:
@@ -1351,6 +1357,25 @@ def _build_user_key(task: Dict[str, Any]) -> str:
     if sender_name:
         return sender_name
     return str(task.get("chatroom_id"))
+
+
+def schedule_long_wait_notice(task: Dict[str, Any], delay_sec: float = 6.0):
+    req_id = str(task.get("request_id") or "")
+    chatroom_id = task.get("chatroom_id")
+    if not req_id or not chatroom_id:
+        return
+
+    def _notify_if_still_running():
+        try:
+            time.sleep(delay_sec)
+            with llm_job_state_lock:
+                state = llm_job_state.get(req_id)
+            if state in ("queued", "running"):
+                chatBot.send_text(chatroom_id, "⏳ 아직 분석 중입니다. 문서 확인 후 정리해서 보내드리겠습니다.")
+        except Exception as e:
+            print(f"[LLM][{req_id}] long-wait notice failed: {e}")
+
+    threading.Thread(target=_notify_if_still_running, daemon=True).start()
 
 
 def llm_worker_loop(worker_name: str):
@@ -1371,6 +1396,10 @@ def llm_worker_loop(worker_name: str):
                 llm_job_queue.task_done()
                 continue
             inflight[user_key] = True
+
+        if request_id:
+            with llm_job_state_lock:
+                llm_job_state[str(request_id)] = "running"
 
         rag_calls = 0
         llm_calls = 0
@@ -1402,7 +1431,14 @@ def llm_worker_loop(worker_name: str):
                 )
         except Exception as e:
             print(f"[{worker_name}][{request_id}] unexpected worker error: {e}")
+            if request_id:
+                with llm_job_state_lock:
+                    llm_job_state[str(request_id)] = "failed"
         finally:
+            if request_id:
+                with llm_job_state_lock:
+                    if llm_job_state.get(str(request_id)) != "failed":
+                        llm_job_state[str(request_id)] = "done"
             with inflight_lock:
                 inflight[user_key] = False
             llm_job_queue.task_done()
@@ -2956,6 +2992,9 @@ async def post_message(request: Request):
                     chatBot.send_text(chatroom_id, "🤔 검색 중입니다. 잠시만 기다려주세요...")
                 except Exception as send_err:
                     print("[send thinking message failed]", send_err)
+
+                # 지연이 길어질 때만 추가 진행 메시지 전송
+                schedule_long_wait_notice(job, delay_sec=6.0)
 
                 if not enqueue_llm_job(job):
                     chatBot.send_text(chatroom_id, LLM_QUEUE_FULL_MESSAGE)

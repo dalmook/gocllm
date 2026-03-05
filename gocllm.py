@@ -120,7 +120,7 @@ RAG_MIN_RECENCY_SCORE = float(os.getenv("RAG_MIN_RECENCY_SCORE", "0.15"))  # 날
 # Glossary RAG Configuration
 # =========================
 GLOSSARY_RAG_ENABLE = os.getenv("GLOSSARY_RAG_ENABLE", "true").lower() == "true"
-GLOSSARY_RELAXED_THRESHOLD = float(os.getenv("GLOSSARY_RELAXED_THRESHOLD", "0.38"))
+GLOSSARY_THRESHOLD = float(os.getenv("GLOSSARY_THRESHOLD", os.getenv("GLOSSARY_RELAXED_THRESHOLD", "0.35")))
 GLOSSARY_TOPK_MATCH = int(os.getenv("GLOSSARY_TOPK_MATCH", "3"))
 GLOSSARY_INDEX_NAME = os.getenv("GLOSSARY_INDEX_NAME", "glossary_m3_100chunk50")
 MAIL_INDEX_NAME = os.getenv("MAIL_INDEX_NAME", "rp-gocinfo_mail_jsonl")
@@ -928,6 +928,38 @@ def rerank_rag_documents(documents: List[Dict[str, Any]]) -> List[Dict[str, Any]
 RAG_MIN_COMBINED_SCORE = float(os.getenv("RAG_MIN_COMBINED_SCORE", str(RAG_SIMILARITY_THRESHOLD)))
 RAG_MIN_KEYWORD_HITS = int(os.getenv("RAG_MIN_KEYWORD_HITS", "1"))
 
+
+BUSINESS_SPLIT_KEYWORDS = [
+    "주간", "이슈", "정리", "요약", "현황", "리스크", "대응", "이번주", "저번주", "지난주"
+]
+MAIL_STRONG_INTENT_KEYWORDS = [
+    "이슈", "정리", "요약", "현황", "주간", "이번주", "저번주", "지난주"
+]
+GLOSSARY_INTENT_KEYWORDS = ["뭐야", "뜻", "의미", "정의", "약자", "약어", "용어", "무슨 뜻"]
+
+
+def normalize_query_for_search(question: str) -> str:
+    """RAG 검색 직전에만 사용하는 질의 정규화"""
+    q = (question or "").strip()
+    if not q:
+        return ""
+
+    # 영문/숫자와 한글 경계 공백 삽입
+    q = re.sub(r"([A-Za-z0-9])([가-힣])", r"\1 \2", q)
+    q = re.sub(r"([가-힣])([A-Za-z0-9])", r"\1 \2", q)
+
+    # 붙어 있는 업무 키워드 분리
+    for kw in sorted(BUSINESS_SPLIT_KEYWORDS, key=len, reverse=True):
+        q = re.sub(rf"\s*{re.escape(kw)}\s*", f" {kw} ", q)
+
+    # 연속 공백 정리
+    return re.sub(r"\s+", " ", q).strip()
+
+
+def has_strong_mail_intent(question: str) -> bool:
+    q_compact = re.sub(r"\s+", "", question or "")
+    return any(kw in q_compact for kw in MAIL_STRONG_INTENT_KEYWORDS)
+
 GENERAL_QUESTION_HINTS = [
     "날씨", "기온", "비와", "눈와", "환율", "주가", "뉴스", "시간", "몇시",
     "today", "weather", "temperature", "stock", "news", "time"
@@ -940,10 +972,11 @@ def _normalize_text_for_match(s: str) -> str:
     return " ".join(s.split())
 
 def _extract_query_keywords(question: str) -> List[str]:
-    q = _normalize_text_for_match(question)
+    q = _normalize_text_for_match(normalize_query_for_search(question))
     toks = [t for t in q.split() if len(t) >= 2]
     stopwords = {
-        "오늘", "어때", "뭐야", "알려줘", "조회", "관련", "대한", "the", "is", "are",
+        "오늘", "어때", "뭐야", "알려줘", "조회", "관련", "대한", "해줘", "설명",
+        "the", "is", "are",
         "what", "when", "how", "why", "please"
     }
     return [t for t in toks if t not in stopwords]
@@ -989,34 +1022,24 @@ def is_glossary_doc(doc: Dict[str, Any]) -> bool:
 def is_glossary_intent(question: str) -> bool:
     """
     용어형 질문인지 판별
-    - 포함 키워드: 뜻, 의미, 정의, 약자, 무슨, 뭐야, 용어, 무슨뜻
-    - 정규식: 영문 대문자 약어 (2~6자)
-    - 패턴: 란, ~이란
-    - 단, 메일성 요약 의도(이번주/저번주/정리/이슈)가 있으면 False
+    - 키워드: 뭐야, 뜻, 의미, 정의, 약자, 용어, 무슨 뜻
+    - 영문 대문자 약어 패턴 (예: RTF, HBM, TSV)
+    - 단, 메일성 의도가 강하면 False
     """
     q = (question or "").strip()
     if not q:
         return False
-    
-    # 메일성 요약 의도가 강하면 False (메일 RAG 유지)
-    mail_intent_keywords = ["이번주", "저번주", "지난주", "정리", "이슈"]
-    q_compact = q.replace(" ", "")
-    if any(kw in q_compact for kw in mail_intent_keywords):
+
+    if has_strong_mail_intent(q):
         return False
-    
-    # 용어형 질문 키워드
-    glossary_keywords = ["뜻", "의미", "정의", "약자", "무슨", "뭐야", "용어", "무슨뜻"]
-    if any(kw in q for kw in glossary_keywords):
+
+    q_norm = _normalize_text_for_match(q)
+    if any(kw in q_norm for kw in GLOSSARY_INTENT_KEYWORDS):
         return True
-    
-    # 영문 대문자 약어 패턴 (2~6자)
-    if re.search(r"\b[A-Z]{2,6}\b", q):
+
+    if re.search(r"\b[A-Z]{2,8}\b", q):
         return True
-    
-    # "~란", "~이란" 패턴
-    if re.search(r".?란\s*$", q) or re.search(r".?이란\s*$", q):
-        return True
-    
+
     return False
 
 def is_glossary_result_relevant(
@@ -1024,51 +1047,38 @@ def is_glossary_result_relevant(
     docs: List[Dict[str, Any]],
     *,
     topk: int = 3,
-    min_score: float = 0.38
+    min_score: float = 0.35
 ) -> bool:
     """
     glossary 문서들에 대한 완화된 관련성 판정
-    - topK 중 하나라도 키워드/약어가 매칭되면 True
-    - 점수 조건은 완화 (min_score)
+    - glossary 전용 낮은 threshold 사용
+    - topK 중 하나라도 질문 키워드/약어가 매칭되면 True
     """
     if not docs:
         return False
-    
-    # glossary 문서만 필터
+
     gdocs = [d for d in docs if is_glossary_doc(d)]
     if not gdocs:
         return False
-    
-    # 상위 topk 대상으로 검사
-    target_docs = gdocs[:topk]
-    
-    # 질문에서 키워드 추출
+
+    target_docs = gdocs[:max(1, topk)]
     keywords = _extract_query_keywords(question)
-    
-    # 약어 추출 (영문 대문자 2~8자)
-    abbreviations = re.findall(r"\b[A-Z]{2,8}\b", question)
-    
-    # 각 문서에 대해 키워드/약어 매칭 확인
+    abbreviations = re.findall(r"\b[A-Z]{2,8}\b", question or "")
+
     for doc in target_docs:
+        combined_score = float(doc.get("_combined_score") or 0.0)
+        if combined_score < min_score:
+            continue
+
         title = str(doc.get("title") or "")
         content = str(doc.get("content") or doc.get("merge_title_content") or "")
         haystack = _normalize_text_for_match(title + " " + content)
-        
-        # 키워드 매칭 확인
-        keyword_hits = sum(1 for kw in keywords if kw in haystack)
-        if keyword_hits >= 1:
+
+        if any(abbr.lower() in haystack for abbr in abbreviations):
             return True
-        
-        # 약어 매칭 확인
-        for abbr in abbreviations:
-            if abbr in haystack:
-                return True
-        
-        # 점수 조건 (완화된 threshold)
-        combined_score = float(doc.get("_combined_score") or 0.0)
-        if combined_score >= min_score:
+        if any(kw in haystack for kw in keywords):
             return True
-    
+
     return False
 
 def format_rag_context(documents: List[Dict[str, Any]], max_docs: int = 3) -> str:
@@ -1228,18 +1238,23 @@ def start_llm_workers():
         llm_workers_started = True
 
 def build_search_queries(question: str, llm: ChatOpenAI) -> List[str]:
-    sanitized_original = sanitize_query(question)
+    normalized = normalize_query_for_search(question)
+    sanitized_original = sanitize_query(normalized)
     if not sanitized_original:
         return []
+
+    # rewrite 비활성화 시 LLM 전처리 호출 없이 normalized 원문 1개만 사용
+    if not ENABLE_QUERY_REWRITE:
+        return [sanitized_original]
 
     queries: List[str] = []
     if RAG_INCLUDE_ORIGINAL_QUERY:
         queries.append(sanitized_original)
 
-    if ENABLE_QUERY_REWRITE and len(sanitized_original) > 12:
+    if len(sanitized_original) > 12:
         rewritten = rewrite_search_queries(question, llm)
         for item in rewritten:
-            sq = sanitize_query(item)
+            sq = sanitize_query(normalize_query_for_search(item))
             if sq and sq not in queries:
                 queries.append(sq)
 
@@ -1293,6 +1308,12 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             chatBot.send_text(chatroom_id, f"🤖 {answer}")
             return stats
 
+        normalized_query = normalize_query_for_search(question)
+        glossary_intent = is_glossary_intent(question)
+        print(f"[RAG] original question={question}")
+        print(f"[RAG] normalized query={normalized_query}")
+        print(f"[RAG] glossary_intent={glossary_intent}")
+
         search_queries = build_search_queries(question, llm)
         print(f"[RAG] search queries: {search_queries}")
 
@@ -1307,68 +1328,72 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         )
         stats["rag_calls"] = len(search_queries)
 
-        if time_range:
-            ranged_docs = _filter_docs_by_datetime_range(
-                all_rag_documents,
+        all_mail_docs = [d for d in all_rag_documents if d.get("_index") == MAIL_INDEX_NAME]
+        all_glossary_docs = [d for d in all_rag_documents if d.get("_index") == GLOSSARY_INDEX_NAME]
+
+        if time_range and all_mail_docs:
+            ranged_mail_docs = _filter_docs_by_datetime_range(
+                all_mail_docs,
                 time_range["start"],
                 time_range["end"],
             )
-            if ranged_docs:
+            if ranged_mail_docs:
                 print(
-                    f"[RAG] 기간 필터 적용: {time_range['label']} "
-                    f"{time_range['start']}~{time_range['end']} docs={len(ranged_docs)}"
+                    f"[RAG] 메일 기간 필터 적용: {time_range['label']} "
+                    f"{time_range['start']}~{time_range['end']} docs={len(ranged_mail_docs)}"
                 )
-                all_rag_documents = ranged_docs
+                all_mail_docs = ranged_mail_docs
             else:
                 print(
-                    f"[RAG] 기간 필터 결과 없음, 원본 결과 사용: {time_range['label']} "
+                    f"[RAG] 메일 기간 필터 결과 없음, 원본 메일 결과 사용: {time_range['label']} "
                     f"{time_range['start']}~{time_range['end']}"
                 )
 
-        reranked_docs = rerank_rag_documents(all_rag_documents)[:RAG_NUM_RESULT_DOC]
-        top_docs = reranked_docs[:RAG_CONTEXT_DOCS]
+        reranked_mail_docs = rerank_rag_documents(all_mail_docs)[:RAG_NUM_RESULT_DOC]
+        reranked_glossary_docs = rerank_rag_documents(all_glossary_docs)[:RAG_NUM_RESULT_DOC]
+        mail_docs = reranked_mail_docs[:RAG_CONTEXT_DOCS]
+        glossary_docs = reranked_glossary_docs[:max(RAG_CONTEXT_DOCS, GLOSSARY_TOPK_MATCH)]
 
-        # =========================
-        # 메일 우선 + Glossary 완화 로직
-        # =========================
-        # 문서 분리
-        mail_docs = [d for d in top_docs if d.get("_index") == MAIL_INDEX_NAME]
-        glossary_docs = [d for d in top_docs if d.get("_index") == GLOSSARY_INDEX_NAME]
-
-        # 로깅용 변수
         selected_rag_domain = "none"
-        glossary_intent = False
         glossary_match = False
         mail_match = False
+        skip_rag = False
+        rag_relevant = False
+        rag_context = ""
+        selected_docs: List[Dict[str, Any]] = []
 
-        # 1) 메일 우선: 메일 문서가 있고 관련성이 높으면 메일 RAG 사용
         if mail_docs and is_rag_result_relevant(question, mail_docs):
             selected_rag_domain = "mail"
             mail_match = True
             rag_relevant = True
+            selected_docs = mail_docs
             rag_context = format_rag_context(mail_docs, max_docs=RAG_CONTEXT_DOCS)
-        # 2) 용어형 질문이고 glossary 문서가 있으면 완화된 기준으로 glossary RAG 사용
-        elif GLOSSARY_RAG_ENABLE and is_glossary_intent(question) and glossary_docs:
-            selected_rag_domain = "glossary"
-            glossary_intent = True
+        elif GLOSSARY_RAG_ENABLE and glossary_intent and glossary_docs:
             glossary_match = is_glossary_result_relevant(
                 question,
                 glossary_docs,
                 topk=GLOSSARY_TOPK_MATCH,
-                min_score=GLOSSARY_RELAXED_THRESHOLD
+                min_score=GLOSSARY_THRESHOLD,
             )
-            rag_relevant = glossary_match
-            rag_context = format_rag_context(glossary_docs, max_docs=RAG_CONTEXT_DOCS) if glossary_match else ""
-        # 3) 기존 로직 유지 (fallback)
+            if glossary_match:
+                selected_rag_domain = "glossary"
+                rag_relevant = True
+                selected_docs = glossary_docs[:RAG_CONTEXT_DOCS]
+                rag_context = format_rag_context(selected_docs, max_docs=RAG_CONTEXT_DOCS)
         else:
+            combined_docs = rerank_rag_documents(all_rag_documents)[:RAG_NUM_RESULT_DOC]
+            top_docs = combined_docs[:RAG_CONTEXT_DOCS]
             top_score = float(top_docs[0].get("_combined_score") or 0.0) if top_docs else 0.0
             skip_rag = top_score < RAG_SIMILARITY_THRESHOLD
             rag_relevant = (not skip_rag) and is_rag_result_relevant(question, top_docs)
-            rag_context = format_rag_context(top_docs, max_docs=RAG_CONTEXT_DOCS) if rag_relevant else ""
+            if rag_relevant:
+                selected_docs = top_docs
+                rag_context = format_rag_context(top_docs, max_docs=RAG_CONTEXT_DOCS)
 
-        # 로그 출력
-        print(f"[RAG Domain Selection] selected_rag_domain={selected_rag_domain}, "
-              f"glossary_intent={glossary_intent}, glossary_match={glossary_match}, mail_match={mail_match}")
+        print(
+            f"[RAG Domain Selection] selected_rag_domain={selected_rag_domain}, "
+            f"glossary_intent={glossary_intent}, mail_match={mail_match}, glossary_match={glossary_match}"
+        )
 
         if rag_context and rag_relevant:
             from langchain_core.messages import SystemMessage, HumanMessage
@@ -1418,7 +1443,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 
             if "📂 근거 문서" not in answer:
                 source_lines = []
-                for doc in top_docs[:3]:
+                for doc in selected_docs[:3]:
                     title = doc.get("title", "제목 없음")
                     doc_date = doc.get("_doc_date", "날짜 정보 없음")
                     url = doc.get("confluence_mail_page_url", "") or doc.get("url", "")
@@ -1442,11 +1467,15 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             reason = "관련 문서를 찾지 못했습니다."
             if skip_rag:
                 reason = f"검색 문서 유사도가 기준치({RAG_SIMILARITY_THRESHOLD})보다 낮았습니다."
-            elif top_docs and not rag_relevant:
+            elif (mail_docs or glossary_docs) and not rag_relevant:
                 reason = "검색 문서는 있었지만 질문과의 관련성이 낮았습니다."
             stats["fallback_reason"] = reason
             answer = f"📋 문서 기반 답변 미적용\n- {reason}\n- 아래는 일반 LLM 답변입니다.\n\n" + response.content.strip()
 
+        print(
+            f"[RAG Final] selected_rag_domain={selected_rag_domain} used_rag={stats['used_rag']} "
+            f"fallback_reason={stats.get('fallback_reason','')}"
+        )
         chatBot.send_text(chatroom_id, f"🤖 {answer}")
         return stats
 

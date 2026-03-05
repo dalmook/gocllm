@@ -1042,6 +1042,21 @@ def is_glossary_intent(question: str) -> bool:
 
     return False
 
+
+
+def is_force_glossary_query(question: str) -> bool:
+    """'용어'를 명시한 질문은 glossary 우선 경로를 강제"""
+    q_norm = _normalize_text_for_match(question)
+    if not q_norm:
+        return False
+
+    compact = q_norm.replace(" ", "")
+    force_patterns = [
+        "용어검색", "용어알려", "용어설명", "용어뜻", "약어검색", "약어설명"
+    ]
+    return any(p in compact for p in force_patterns)
+
+
 def is_glossary_result_relevant(
     question: str,
     docs: List[Dict[str, Any]],
@@ -1310,9 +1325,11 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 
         normalized_query = normalize_query_for_search(question)
         glossary_intent = is_glossary_intent(question)
+        force_glossary = is_force_glossary_query(question)
         print(f"[RAG] original question={question}")
         print(f"[RAG] normalized query={normalized_query}")
         print(f"[RAG] glossary_intent={glossary_intent}")
+        print(f"[RAG] force_glossary={force_glossary}")
 
         search_queries = build_search_queries(question, llm)
         print(f"[RAG] search queries: {search_queries}")
@@ -1362,7 +1379,25 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         rag_context = ""
         selected_docs: List[Dict[str, Any]] = []
 
-        if mail_docs and is_rag_result_relevant(question, mail_docs):
+        if GLOSSARY_RAG_ENABLE and force_glossary and glossary_docs:
+            glossary_match = is_glossary_result_relevant(
+                question,
+                glossary_docs,
+                topk=GLOSSARY_TOPK_MATCH,
+                min_score=GLOSSARY_THRESHOLD,
+            )
+            if glossary_match:
+                selected_rag_domain = "glossary"
+                rag_relevant = True
+                selected_docs = glossary_docs[:RAG_CONTEXT_DOCS]
+                rag_context = format_rag_context(selected_docs, max_docs=RAG_CONTEXT_DOCS)
+            elif mail_docs and is_rag_result_relevant(question, mail_docs):
+                selected_rag_domain = "mail"
+                mail_match = True
+                rag_relevant = True
+                selected_docs = mail_docs
+                rag_context = format_rag_context(mail_docs, max_docs=RAG_CONTEXT_DOCS)
+        elif mail_docs and is_rag_result_relevant(question, mail_docs):
             selected_rag_domain = "mail"
             mail_match = True
             rag_relevant = True
@@ -1392,7 +1427,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 
         print(
             f"[RAG Domain Selection] selected_rag_domain={selected_rag_domain}, "
-            f"glossary_intent={glossary_intent}, mail_match={mail_match}, glossary_match={glossary_match}"
+            f"glossary_intent={glossary_intent}, force_glossary={force_glossary}, mail_match={mail_match}, glossary_match={glossary_match}"
         )
 
         if rag_context and rag_relevant:

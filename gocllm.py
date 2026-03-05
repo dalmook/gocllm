@@ -972,10 +972,11 @@ def _normalize_text_for_match(s: str) -> str:
     return " ".join(s.split())
 
 def _extract_query_keywords(question: str) -> List[str]:
-    q = _normalize_text_for_match(question)
+    q = _normalize_text_for_match(normalize_query_for_search(question))
     toks = [t for t in q.split() if len(t) >= 2]
     stopwords = {
-        "오늘", "어때", "뭐야", "알려줘", "조회", "관련", "대한", "the", "is", "are",
+        "오늘", "어때", "뭐야", "알려줘", "조회", "관련", "대한", "해줘", "설명",
+        "the", "is", "are",
         "what", "when", "how", "why", "please"
     }
     return [t for t in toks if t not in stopwords]

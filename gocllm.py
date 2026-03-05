@@ -818,7 +818,7 @@ def _extract_time_range_from_question(question: str) -> Optional[Dict[str, Any]]
 
     # 3) "최근 N일/최근 N주/최근 N개월" (rolling window)
     #    - 숫자 없이 "최근/요즘/근래/최근에"만 있으면 default 7일
-    recent_tokens = ("최근", "요즘", "근래", "최근에")
+    recent_tokens = ("최근", "요즘", "근래", "최근에", "최신", "최신순", "최신이슈", "최근이슈")
     if any(tok in q_compact for tok in recent_tokens):
         # 예: 최근3일 / 최근 2주 / 최근 한달 / 요즘(=default)
         # 숫자: 1~3자리, 단위: 일/주/주일/개월/달
@@ -878,7 +878,7 @@ def _filter_docs_by_datetime_range(
     return filtered
 
 
-def rerank_rag_documents(documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def rerank_rag_documents(documents: List[Dict[str, Any]], prefer_recent: bool = False) -> List[Dict[str, Any]]:
     if not documents:
         return []
     merged: Dict[str, Dict[str, Any]] = {}
@@ -914,27 +914,40 @@ def rerank_rag_documents(documents: List[Dict[str, Any]]) -> List[Dict[str, Any]
         if dt:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=ZoneInfo("Asia/Seoul"))
-            age_days = max((now - dt.astimezone(ZoneInfo("Asia/Seoul"))).total_seconds() / 86400.0, 0.0)
+            dt_local = dt.astimezone(ZoneInfo("Asia/Seoul"))
+            age_days = max((now - dt_local).total_seconds() / 86400.0, 0.0)
             recency_score = max(
                 RAG_MIN_RECENCY_SCORE,
                 math.exp(-math.log(2) * age_days / max(RAG_RECENCY_HALF_LIFE_DAYS, 1.0))
             )
-            d["_doc_date"] = dt.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
+            d["_doc_date"] = dt_local.strftime("%Y-%m-%d %H:%M")
+            d["_doc_ts"] = dt_local.timestamp()
         else:
             recency_score = RAG_MIN_RECENCY_SCORE
             d["_doc_date"] = "날짜 정보 없음"
+            d["_doc_ts"] = 0.0
         query_hit_bonus = min(max(int(d.get("_query_hits") or 1) - 1, 0), 3) * 0.03
         combined_score = ((1 - RAG_RECENCY_WEIGHT) * vec_norm) + (RAG_RECENCY_WEIGHT * recency_score) + query_hit_bonus
         d["_vector_norm"] = round(vec_norm, 4)
         d["_recency_score"] = round(recency_score, 4)
         d["_combined_score"] = round(combined_score, 4)
-    docs.sort(
-        key=lambda x: (
-            float(x.get("_combined_score", 0.0)),
-            float(x.get("_vector_score", 0.0))
-        ),
-        reverse=True
-    )
+    if prefer_recent:
+        docs.sort(
+            key=lambda x: (
+                float(x.get("_doc_ts", 0.0)),
+                float(x.get("_combined_score", 0.0)),
+                float(x.get("_vector_score", 0.0)),
+            ),
+            reverse=True,
+        )
+    else:
+        docs.sort(
+            key=lambda x: (
+                float(x.get("_combined_score", 0.0)),
+                float(x.get("_vector_score", 0.0))
+            ),
+            reverse=True
+        )
     return docs
 RAG_MIN_COMBINED_SCORE = float(os.getenv("RAG_MIN_COMBINED_SCORE", str(RAG_SIMILARITY_THRESHOLD)))
 RAG_MIN_KEYWORD_HITS = int(os.getenv("RAG_MIN_KEYWORD_HITS", "1"))
@@ -944,9 +957,12 @@ BUSINESS_SPLIT_KEYWORDS = [
     "주간", "이슈", "정리", "요약", "현황", "리스크", "대응", "이번주", "저번주", "지난주"
 ]
 MAIL_STRONG_INTENT_KEYWORDS = [
-    "이슈", "정리", "요약", "현황", "주간", "이번주", "저번주", "지난주"
+    "이슈", "정리", "요약", "현황", "주간", "이번주", "저번주", "지난주", "최신", "최근", "업데이트"
 ]
 GLOSSARY_INTENT_KEYWORDS = ["뭐야", "뜻", "의미", "정의", "약자", "약어", "용어", "무슨 뜻"]
+RECENT_PRIORITY_KEYWORDS = [
+    "최신", "최근", "요즘", "근래", "업데이트", "이번주", "금주", "최근이슈", "최신이슈"
+]
 
 
 def normalize_query_for_search(question: str) -> str:
@@ -1066,6 +1082,14 @@ def is_force_glossary_query(question: str) -> bool:
         "용어검색", "용어알려", "용어설명", "용어뜻", "약어검색", "약어설명"
     ]
     return any(p in compact for p in force_patterns)
+
+
+def should_prioritize_recent_docs(question: str) -> bool:
+    q_norm = _normalize_text_for_match(question)
+    if not q_norm:
+        return False
+    compact = q_norm.replace(" ", "")
+    return any(k in compact for k in RECENT_PRIORITY_KEYWORDS)
 
 
 def is_glossary_result_relevant(
@@ -1546,9 +1570,11 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[RAG] search queries: {search_queries}")
 
         time_range = _extract_time_range_from_question(question)
+        prefer_recent_docs = bool(time_range) or should_prioritize_recent_docs(question)
         retrieve_top_k = RAG_NUM_RESULT_DOC
         if time_range:
             retrieve_top_k = max(RAG_NUM_RESULT_DOC, RAG_TEMPORAL_NUM_RESULT_DOC)
+        print(f"[RAG] prefer_recent_docs={prefer_recent_docs} time_range={(time_range or {}).get('label') if time_range else 'none'}")
 
         t_rag = time.perf_counter()
         all_rag_documents = retrieve_rag_documents_parallel(
@@ -1580,8 +1606,8 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 )
 
         t_rerank = time.perf_counter()
-        reranked_mail_docs = rerank_rag_documents(all_mail_docs)[:RAG_NUM_RESULT_DOC]
-        reranked_glossary_docs = rerank_rag_documents(all_glossary_docs)[:RAG_NUM_RESULT_DOC]
+        reranked_mail_docs = rerank_rag_documents(all_mail_docs, prefer_recent=prefer_recent_docs)[:RAG_NUM_RESULT_DOC]
+        reranked_glossary_docs = rerank_rag_documents(all_glossary_docs, prefer_recent=prefer_recent_docs)[:RAG_NUM_RESULT_DOC]
         perf["rerank_ms"] = (time.perf_counter() - t_rerank) * 1000
         mail_docs = reranked_mail_docs[:RAG_CONTEXT_DOCS]
         glossary_docs = reranked_glossary_docs[:max(RAG_CONTEXT_DOCS, GLOSSARY_TOPK_MATCH)]
@@ -1631,7 +1657,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 selected_docs = glossary_docs[:RAG_CONTEXT_DOCS]
                 rag_context = format_rag_context(selected_docs, max_docs=RAG_CONTEXT_DOCS)
         else:
-            combined_docs = rerank_rag_documents(all_rag_documents)[:RAG_NUM_RESULT_DOC]
+            combined_docs = rerank_rag_documents(all_rag_documents, prefer_recent=prefer_recent_docs)[:RAG_NUM_RESULT_DOC]
             top_docs = combined_docs[:RAG_CONTEXT_DOCS]
             top_score = float(top_docs[0].get("_combined_score") or 0.0) if top_docs else 0.0
             skip_rag = top_score < RAG_SIMILARITY_THRESHOLD
@@ -1658,7 +1684,8 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 3) 질문에 기간(이번주/저번주/지난주/오늘/어제/최근N일)이 포함되면, 답변 첫 줄 또는 요약에 적용한 기간을 반드시 명시하세요.
                 4) 질문에 기간 지정이 없으면, 검색 문서 중 "가장 최신 문서일시"를 기준으로 답변하고, 그 기준 문서일시를 명시하세요.
                 5) 문서 간 내용이 다르면 가장 최신 문서를 우선하고, "문서 간 상충"이라고 표시하세요.
-                6) "💡 AI 의견"은 참고용 보충설명만 가능하며, 문서 사실처럼 단정하지 마세요. 문서와 충돌하면 문서가 항상 우선입니다.
+                6) 답변의 항목/불릿은 가능한 한 문서일시 최신순(내림차순)으로 배치하세요.
+                7) "💡 AI 의견"은 참고용 보충설명만 가능하며, 문서 사실처럼 단정하지 마세요. 문서와 충돌하면 문서가 항상 우선입니다.
 
                 [검색 문서]
                 {rag_context}

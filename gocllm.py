@@ -632,6 +632,7 @@ def search_rag_documents(
 
 
 DATE_FIELD_CANDIDATES = [
+    "created_time", "last_modified_time", "updated_time", "modified_time",
     "updated_at", "updated_date", "last_updated", "last_modified",
     "modified_at", "modified_date", "created_at", "created_date",
     "register_date", "reg_date", "date", "datetime", "timestamp",
@@ -1600,10 +1601,26 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 all_mail_docs = ranged_mail_docs
             else:
-                print(
-                    f"[RAG] 메일 기간 필터 결과 없음, 원본 메일 결과 사용: {time_range['label']} "
-                    f"{time_range['start']}~{time_range['end']}"
+                # 시간의도 질문(이번주/최근/최신)에서는 원본으로 되돌리지 않고,
+                # 우선 확장 기간(직전 14일)으로 1회 재시도 후 없으면 빈 결과를 유지.
+                expanded_start = time_range["start"] - timedelta(days=14)
+                expanded_mail_docs = _filter_docs_by_datetime_range(
+                    all_mail_docs,
+                    expanded_start,
+                    time_range["end"],
                 )
+                if expanded_mail_docs:
+                    print(
+                        f"[RAG] 메일 기간 확장 필터 적용: {expanded_start}~{time_range['end']} "
+                        f"docs={len(expanded_mail_docs)}"
+                    )
+                    all_mail_docs = expanded_mail_docs
+                else:
+                    print(
+                        f"[RAG] 메일 기간 필터 결과 없음(확장 포함). 원본 fallback 비활성: "
+                        f"{time_range['label']} {time_range['start']}~{time_range['end']}"
+                    )
+                    all_mail_docs = []
 
         t_rerank = time.perf_counter()
         reranked_mail_docs = rerank_rag_documents(all_mail_docs, prefer_recent=prefer_recent_docs)[:RAG_NUM_RESULT_DOC]

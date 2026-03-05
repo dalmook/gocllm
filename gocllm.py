@@ -1279,6 +1279,10 @@ def build_search_queries(question: str, llm: ChatOpenAI) -> List[str]:
     if not sanitized_original:
         return []
 
+    # rewrite 비활성화 시 LLM 전처리 호출 없이 normalized 원문 1개만 사용
+    if not ENABLE_QUERY_REWRITE:
+        return [sanitized_original]
+
     queries: List[str] = []
     if RAG_INCLUDE_ORIGINAL_QUERY:
         queries.append(sanitized_original)

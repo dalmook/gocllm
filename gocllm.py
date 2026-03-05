@@ -111,12 +111,12 @@ RAG_BASE_URL = os.getenv("RAG_BASE_URL", "http://apigw.samsungds.net:8000/ds_llm
 RAG_INDEXES = os.getenv("RAG_INDEXES", "rp-gocinfo_mail_jsonl,glossary_m3_100chunk50")
 RAG_PERMISSION_GROUPS = os.getenv("RAG_PERMISSION_GROUPS", "rag-public")
 # RAG 후보는 top6까지만 가져오고, 최종 컨텍스트는 top3만 사용
-RAG_NUM_RESULT_DOC = int(os.getenv("RAG_NUM_RESULT_DOC", "6"))   # vector search top_k
-RAG_CONTEXT_DOCS = int(os.getenv("RAG_CONTEXT_DOCS", "3"))       # rerank 후 최종 반영 top_k
-RAG_TEMPORAL_NUM_RESULT_DOC = int(os.getenv("RAG_TEMPORAL_NUM_RESULT_DOC", "40"))  # 시간조건 질문일 때 후보 확장
-RAG_REWRITE_QUERY_COUNT = max(1, int(os.getenv("RAG_REWRITE_QUERY_COUNT", "2")))
-ENABLE_QUERY_REWRITE = os.getenv("ENABLE_QUERY_REWRITE", "true").lower() == "true"
-MAX_RAG_QUERIES = max(1, int(os.getenv("MAX_RAG_QUERIES", "2")))
+RAG_NUM_RESULT_DOC = int(os.getenv("RAG_NUM_RESULT_DOC", "3"))   # vector search top_k (latency-tuned default)
+RAG_CONTEXT_DOCS = int(os.getenv("RAG_CONTEXT_DOCS", "2"))       # rerank 후 최종 반영 top_k (latency-tuned default)
+RAG_TEMPORAL_NUM_RESULT_DOC = int(os.getenv("RAG_TEMPORAL_NUM_RESULT_DOC", "20"))  # 시간조건 질문일 때 후보 확장
+RAG_REWRITE_QUERY_COUNT = max(1, int(os.getenv("RAG_REWRITE_QUERY_COUNT", "1")))
+ENABLE_QUERY_REWRITE = os.getenv("ENABLE_QUERY_REWRITE", "false").lower() == "true"
+MAX_RAG_QUERIES = max(1, int(os.getenv("MAX_RAG_QUERIES", "1")))
 RAG_INCLUDE_ORIGINAL_QUERY = os.getenv("RAG_INCLUDE_ORIGINAL_QUERY", "true").lower() == "true"
 RAG_RETRIEVE_MODE = os.getenv("RAG_RETRIEVE_MODE", "hybrid").lower()
 RAG_BM25_BOOST = float(os.getenv("RAG_BM25_BOOST", "0.025"))
@@ -138,11 +138,12 @@ MAIL_INDEX_NAME = os.getenv("MAIL_INDEX_NAME", "rp-gocinfo_mail_jsonl")
 LLM_WORKERS = max(1, int(os.getenv("LLM_WORKERS", os.getenv("LLM_WORKER_COUNT", "4"))))
 LLM_JOB_QUEUE_MAX = max(1, int(os.getenv("LLM_JOB_QUEUE_MAX", "200")))
 LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", "4")))
+LLM_PROFILE_LOG = os.getenv("LLM_PROFILE_LOG", "true").lower() == "true"
 LLM_ALLOWED_USERS_SQL = os.getenv(
     "LLM_ALLOWED_USERS_SQL",
     "SELECT SSO_ID FROM SCM_WP.T_T_FOR_MASTER A WHERE 1=1 AND a.sso_id in ('hy73.park','cheon.kim','suy.kim','kyungchan.seong','jh3.park','junsoo.jung','jjlive.kim','jc2573.lee','hs1979.kim','sunok78.han','sungmook.cho','hsung.chae','sj82.han','w2635.lee','sung.w.jung') AND A.DEPT_NAME LIKE '%메모리%' and a.POSITION_CODE is not null AND A.SSO_ID NOT IN ('SCM.RPA','SCM 봇','메모리STO2','메모리 STO','dalbong.chatbot01', 'dalbongbot01', 'dalbong.bot01', 'command.center', 'thatcoolguy')"
 )
-LLM_ALLOWED_USERS_CACHE_TTL_SEC = max(0, int(os.getenv("LLM_ALLOWED_USERS_CACHE_TTL_SEC", "300")))
+LLM_ALLOWED_USERS_CACHE_TTL_SEC = max(0, int(os.getenv("LLM_ALLOWED_USERS_CACHE_TTL_SEC", "1800")))
 
 # ✅ SINGLE(1:1) 단축키 → URL
 # ✅ SINGLE(1:1) 단축키(별칭 묶음) → URL
@@ -1463,10 +1464,12 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         "memory_prompt_chars": 0,
         "rewrite_used_memory": False,
     }
+    perf = {"t0": time.perf_counter()}
 
     try:
         user_id = sender_knox if sender_knox else "bot"
         llm = create_llm_chatbot(user_id)
+        perf["llm_init_ms"] = (time.perf_counter() - perf["t0"]) * 1000
 
         memory_messages = load_conversation_memory(scope_id=scope_id, chat_type=chat_type)
         memory_text = build_memory_text(memory_messages)
@@ -1478,6 +1481,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         stats["memory_prompt_chars"] = memory_chars
         stats["rewrite_used_memory"] = use_memory_for_rewrite
         print(f"[MEMORY] hit={memory_hit} message_count={len(memory_messages)} prompt_chars={memory_chars} use_in_rewrite={use_memory_for_rewrite}")
+        perf["memory_ms"] = (time.perf_counter() - perf["t0"]) * 1000
 
         prefer_general = should_prefer_general_llm(question)
         if prefer_general:
@@ -1502,7 +1506,9 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             if memory_text:
                 messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
             messages.append(HumanMessage(content=question))
+            t_llm = time.perf_counter()
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
+            perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
             stats["llm_calls"] += 1
             stats["fallback_reason"] = "prefer_general"
             answer = "📋 문서 기반 답변 미적용\n- 일반 지식/실시간 성격의 질문으로 판단했습니다.\n- 아래는 일반 LLM 답변입니다.\n\n" + response.content.strip()
@@ -1515,6 +1521,15 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 content=answer,
                 chat_type=chat_type,
             )
+            perf["total_ms"] = (time.perf_counter() - perf["t0"]) * 1000
+            if LLM_PROFILE_LOG:
+                print(
+                    "[LLM PERF] "
+                    f"total={perf.get('total_ms', 0):.0f}ms "
+                    f"init={perf.get('llm_init_ms', 0):.0f}ms "
+                    f"memory={perf.get('memory_ms', 0):.0f}ms "
+                    f"llm={perf.get('llm_ms', 0):.0f}ms"
+                )
             return stats
 
         normalized_query = normalize_query_for_search(question)
@@ -1525,7 +1540,9 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[RAG] glossary_intent={glossary_intent}")
         print(f"[RAG] force_glossary={force_glossary}")
 
+        t_rewrite = time.perf_counter()
         search_queries = build_search_queries(question, llm, memory_text=memory_text, use_memory_for_rewrite=use_memory_for_rewrite)
+        perf["rewrite_ms"] = (time.perf_counter() - t_rewrite) * 1000
         print(f"[RAG] search queries: {search_queries}")
 
         time_range = _extract_time_range_from_question(question)
@@ -1533,10 +1550,12 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         if time_range:
             retrieve_top_k = max(RAG_NUM_RESULT_DOC, RAG_TEMPORAL_NUM_RESULT_DOC)
 
+        t_rag = time.perf_counter()
         all_rag_documents = retrieve_rag_documents_parallel(
             search_queries,
             top_k=retrieve_top_k,
         )
+        perf["rag_fetch_ms"] = (time.perf_counter() - t_rag) * 1000
         stats["rag_calls"] = len(search_queries)
 
         all_mail_docs = [d for d in all_rag_documents if d.get("_index") == MAIL_INDEX_NAME]
@@ -1560,8 +1579,10 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                     f"{time_range['start']}~{time_range['end']}"
                 )
 
+        t_rerank = time.perf_counter()
         reranked_mail_docs = rerank_rag_documents(all_mail_docs)[:RAG_NUM_RESULT_DOC]
         reranked_glossary_docs = rerank_rag_documents(all_glossary_docs)[:RAG_NUM_RESULT_DOC]
+        perf["rerank_ms"] = (time.perf_counter() - t_rerank) * 1000
         mail_docs = reranked_mail_docs[:RAG_CONTEXT_DOCS]
         glossary_docs = reranked_glossary_docs[:max(RAG_CONTEXT_DOCS, GLOSSARY_TOPK_MATCH)]
 
@@ -1670,7 +1691,9 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
             messages.append(HumanMessage(content=f"[RAG context]\n{rag_context}"))
             messages.append(HumanMessage(content=question))
+            t_llm = time.perf_counter()
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
+            perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
             stats["llm_calls"] += 1
             answer = response.content.strip()
 
@@ -1697,7 +1720,9 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             if memory_text:
                 messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
             messages.append(HumanMessage(content=question))
+            t_llm = time.perf_counter()
             response = llm_invoke_with_retry(llm, messages, attempts=3, base_delay=1.5)
+            perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
             stats["llm_calls"] += 1
 
             reason = "관련 문서를 찾지 못했습니다."
@@ -1721,6 +1746,18 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             content=answer,
             chat_type=chat_type,
         )
+        perf["total_ms"] = (time.perf_counter() - perf["t0"]) * 1000
+        if LLM_PROFILE_LOG:
+            print(
+                "[LLM PERF] "
+                f"total={perf.get('total_ms', 0):.0f}ms "
+                f"init={perf.get('llm_init_ms', 0):.0f}ms "
+                f"memory={perf.get('memory_ms', 0):.0f}ms "
+                f"rewrite={perf.get('rewrite_ms', 0):.0f}ms "
+                f"rag={perf.get('rag_fetch_ms', 0):.0f}ms "
+                f"rerank={perf.get('rerank_ms', 0):.0f}ms "
+                f"llm={perf.get('llm_ms', 0):.0f}ms"
+            )
         return stats
 
     except Exception as e:

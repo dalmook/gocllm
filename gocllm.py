@@ -1197,6 +1197,8 @@ llm_job_queue: "queue.Queue[dict]" = queue.Queue(maxsize=LLM_JOB_QUEUE_MAX)
 llm_task_state_lock = threading.Lock()
 llm_job_state_lock = threading.Lock()
 llm_job_state: Dict[str, str] = {}  # queued|running|done|failed
+llm_notice_lock = threading.Lock()
+llm_notice_state: Dict[str, List[Tuple[int, int]]] = {}
 inflight: Dict[str, bool] = {}
 inflight_lock = threading.Lock()
 llm_sem = threading.Semaphore(LLM_MAX_CONCURRENT)
@@ -1334,6 +1336,31 @@ def _mark_job_counter():
         return job_metrics["minute"], job_metrics["count"]
 
 
+def _register_llm_notice(req_id: str, resp: Any):
+    if not req_id:
+        return
+    try:
+        mid, st = extract_msgid_senttime(resp if isinstance(resp, dict) else {})
+        if mid is None or st is None:
+            return
+        with llm_notice_lock:
+            llm_notice_state.setdefault(req_id, []).append((int(mid), int(st)))
+    except Exception as e:
+        print(f"[LLM][{req_id}] notice register failed: {e}")
+
+
+def _recall_llm_notices(chatroom_id: int, req_id: str):
+    if not ENABLE_RECALL or not req_id or chatBot is None:
+        return
+    with llm_notice_lock:
+        notices = llm_notice_state.pop(req_id, [])
+    for mid, st in notices:
+        try:
+            chatBot.recall_message(chatroom_id, int(mid), int(st))
+        except Exception as e:
+            print(f"[LLM][{req_id}] notice recall failed: {e}")
+
+
 def enqueue_llm_job(job: Dict[str, Any]) -> bool:
     try:
         llm_job_queue.put_nowait(job)
@@ -1371,7 +1398,8 @@ def schedule_long_wait_notice(task: Dict[str, Any], delay_sec: float = 6.0):
             with llm_job_state_lock:
                 state = llm_job_state.get(req_id)
             if state in ("queued", "running"):
-                chatBot.send_text(chatroom_id, "⏳ 아직 분석 중입니다. 문서 확인 후 정리해서 보내드리겠습니다.")
+                resp = chatBot.send_text(chatroom_id, "⏳ 아직 분석 중입니다. 문서 확인 후 정리해서 보내드리겠습니다.")
+                _register_llm_notice(req_id, resp)
         except Exception as e:
             print(f"[LLM][{req_id}] long-wait notice failed: {e}")
 
@@ -1439,6 +1467,10 @@ def llm_worker_loop(worker_name: str):
                 with llm_job_state_lock:
                     if llm_job_state.get(str(request_id)) != "failed":
                         llm_job_state[str(request_id)] = "done"
+                try:
+                    _recall_llm_notices(int(task.get("chatroom_id")), str(request_id))
+                except Exception as e:
+                    print(f"[{worker_name}][{request_id}] recall notices failed: {e}")
             with inflight_lock:
                 inflight[user_key] = False
             llm_job_queue.task_done()
@@ -2989,7 +3021,8 @@ async def post_message(request: Request):
                 }
 
                 try:
-                    chatBot.send_text(chatroom_id, "🤔 검색 중입니다. 잠시만 기다려주세요...")
+                    resp = chatBot.send_text(chatroom_id, "🤔 검색 중입니다. 잠시만 기다려주세요...")
+                    _register_llm_notice(request_id, resp)
                 except Exception as send_err:
                     print("[send thinking message failed]", send_err)
 

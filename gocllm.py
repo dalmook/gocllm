@@ -1806,6 +1806,10 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                     source_lines.append(line)
                 if source_lines:
                     answer += "\n\n📂 근거 문서\n" + "\n".join(source_lines)
+
+            # 속도 모드(이슈 요약)에서도 이슈지 바로가기 링크를 항상 하단에 고정 노출
+            if issue_summary_intent and "https://go/issueG" not in answer:
+                answer += "\n\n🔗 이슈지 바로가기 👉 https://go/issueG"
         else:
             from langchain_core.messages import SystemMessage, HumanMessage
             fallback_system_prompt = """

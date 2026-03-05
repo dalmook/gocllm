@@ -1045,7 +1045,8 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             📂 문서 기반 답변
             💡 AI 의견
             📂 근거 문서
-            ⚠️ 주의            
+            ⚠️ 주의         
+            🔗 이슈지 바로가기 👉 "https://go/이슈지"
             """
 
             messages = [SystemMessage(content=system_prompt), HumanMessage(content=question)]

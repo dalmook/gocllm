@@ -1252,6 +1252,27 @@ def start_llm_workers():
             ).start()
         llm_workers_started = True
 
+
+
+def generate_deterministic_query_variants(question: str) -> List[str]:
+    """LLM 호출 없이 붙여쓰기/표현 차이를 보정하는 검색 질의 변형"""
+    base = normalize_query_for_search(question)
+    if not base:
+        return []
+
+    variants: List[str] = []
+    q = re.sub(r"\s+", " ", base).strip()
+
+    # "EDP 주요 이슈 정리"처럼 조직/도메인 + 주요 이슈 패턴은
+    # 문서에 자주 등장하는 "파트"를 보강한 질의를 함께 검색
+    if "주요" in q and "이슈" in q and "정리" in q and "파트" not in q:
+        parts = q.split()
+        if parts:
+            lead = parts[0]
+            if re.fullmatch(r"[A-Za-z0-9]{2,10}", lead):
+                variants.append(f"{lead} 파트 " + " ".join(parts[1:]))
+
+    return [v for v in variants if v and v != base]
 def build_search_queries(question: str, llm: ChatOpenAI) -> List[str]:
     normalized = normalize_query_for_search(question)
     sanitized_original = sanitize_query(normalized)
@@ -1266,12 +1287,25 @@ def build_search_queries(question: str, llm: ChatOpenAI) -> List[str]:
     if RAG_INCLUDE_ORIGINAL_QUERY:
         queries.append(sanitized_original)
 
-    if len(sanitized_original) > 12:
+    # LLM 호출 없이 deterministic 변형을 먼저 추가 (ex. "EDP" -> "EDP 파트")
+    deterministic = generate_deterministic_query_variants(question)
+    for item in deterministic:
+        sq = sanitize_query(item)
+        if sq and sq not in queries:
+            queries.append(sq)
+
+    # rewrite 비활성화 시 LLM 전처리 호출 없이 종료
+    if not ENABLE_QUERY_REWRITE:
+        return (queries or [sanitized_original])[:MAX_RAG_QUERIES]
+
+    if len(sanitized_original) > 12 and len(queries) < MAX_RAG_QUERIES:
         rewritten = rewrite_search_queries(question, llm)
         for item in rewritten:
             sq = sanitize_query(normalize_query_for_search(item))
             if sq and sq not in queries:
                 queries.append(sq)
+            if len(queries) >= MAX_RAG_QUERIES:
+                break
 
     if not queries:
         queries = [sanitized_original]

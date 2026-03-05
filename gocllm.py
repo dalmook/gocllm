@@ -83,10 +83,10 @@ LLM_GROUP_PREFIXES = [x.strip() for x in os.getenv("LLM_GROUP_PREFIXES", "봇,�
 # LLM API Configuration (GaussO4)
 # =========================
 # 테스트 키 (운영 키로 변경하려면 아래 값만 수정)
-LLM_API_KEY = os.getenv("LLM_API_KEY", "credential:TICKET-18ab56e4-99cb-4b44-af32-9ad78449fd80:ST0000101295-STG:Bg9vvJDsTo6w23jrHq6j-Q5Itu6yJRQhOmL8VIY3GE1w:-1:Qmc5dnZKRHNUbzZ3MjNqckhxNmotUTVJdHU2eUpSUWhPbUw4VklZM0dFMXc=:signature=O05mxEkLrDAYwCVLzbiPvgMmCmkLXU3oI9eDGZ6R7otW3C5dE0zssv5_a2knr8QYScmOD0v4IvnF4h2vXe2fQ3zLiM1p6qaK6fSRw0l5FDDYSo0BeXbd_cg==")
-LLM_API_URL = os.getenv("LLM_API_URL", "http://apigw-stg.samsungds.net:8000/model-23/1/gausso4-instruct/v1")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "credential:TICKET-96f7bce0-efab-4516-8e62-5501b07ab43c:ST0000107488-PROD:CTXLCkSDRGWtI5HdVHkPAQgol2o-RyQiq2I1vCHHOgGw:-1:Q1RYTENrU0RSR1d0STVIZFZIa1BBUWdvbDJvLVJ5UWlxMkkxdkNISE9nR3c=:signature=eRa1UcfmWGfKTDBt-Xnz2wFhW0OvMX0WESZUpoNVgCA5uNVgpgax59LZ3osPOp8whnZwQay8s5TUvxJGtmsCD9iK-HpcsyUOcE5P58W0Weyg-YQ3KRTWFiA==")
+LLM_API_URL = os.getenv("LLM_API_URL", "http://apigw.samsungds.net:8000/model-23/1/gausso4-instruct/v1")
 LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "GaussO4-instruct")
-LLM_SEND_SYSTEM_NAME = os.getenv("LLM_SEND_SYSTEM_NAME", "test_api_1")
+LLM_SEND_SYSTEM_NAME = os.getenv("LLM_SEND_SYSTEM_NAME", "GOC_MAIL_RAG_PIPELINE")
 LLM_USER_TYPE = os.getenv("LLM_USER_TYPE", "bot")
 
 # =========================
@@ -98,7 +98,7 @@ RAG_DEP_TICKET = os.getenv("RAG_DEP_TICKET", "credential:TICKET-e09692e2-45e3-46
 RAG_API_KEY = os.getenv("RAG_API_KEY", "rag-laeeKyA.KazNAgzjr-d1iK9rUClS2vdqKLZ4oOOcsOhhuR3tJaAYa3h73BE7SdjgLjxQsEtJCN6Oc7B1mJYq1Pu_ruTKmcmeujAVpmDxms44OdjGCeHGBTisaSFHdqyepsbEa3nw")
 RAG_BASE_URL = os.getenv("RAG_BASE_URL", "http://apigw.samsungds.net:8000/ds_llm_rag/2/dsllmrag/elastic/v2")
 # RAG 인덱스 목록 (쉼표로 구분, 나중에 추가 가능)
-RAG_INDEXES = os.getenv("RAG_INDEXES", "rp-gocinfo_mail_jsonl")
+RAG_INDEXES = os.getenv("RAG_INDEXES", "rp-gocinfo_mail_jsonl,glossary_m3_100chunk50")
 RAG_PERMISSION_GROUPS = os.getenv("RAG_PERMISSION_GROUPS", "rag-public")
 # RAG 후보는 top6까지만 가져오고, 최종 컨텍스트는 top3만 사용
 RAG_NUM_RESULT_DOC = int(os.getenv("RAG_NUM_RESULT_DOC", "6"))   # vector search top_k
@@ -115,12 +115,22 @@ RAG_SIMILARITY_THRESHOLD = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.35"))
 RAG_RECENCY_WEIGHT = float(os.getenv("RAG_RECENCY_WEIGHT", "0.28"))   # 최신성 가중치
 RAG_RECENCY_HALF_LIFE_DAYS = float(os.getenv("RAG_RECENCY_HALF_LIFE_DAYS", "30"))  # 반감기(일)
 RAG_MIN_RECENCY_SCORE = float(os.getenv("RAG_MIN_RECENCY_SCORE", "0.15"))  # 날짜 없을 때 최소점수
+
+# =========================
+# Glossary RAG Configuration
+# =========================
+GLOSSARY_RAG_ENABLE = os.getenv("GLOSSARY_RAG_ENABLE", "true").lower() == "true"
+GLOSSARY_RELAXED_THRESHOLD = float(os.getenv("GLOSSARY_RELAXED_THRESHOLD", "0.38"))
+GLOSSARY_TOPK_MATCH = int(os.getenv("GLOSSARY_TOPK_MATCH", "3"))
+GLOSSARY_INDEX_NAME = os.getenv("GLOSSARY_INDEX_NAME", "glossary_m3_100chunk50")
+MAIL_INDEX_NAME = os.getenv("MAIL_INDEX_NAME", "rp-gocinfo_mail_jsonl")
+
 LLM_WORKERS = max(1, int(os.getenv("LLM_WORKERS", os.getenv("LLM_WORKER_COUNT", "4"))))
 LLM_JOB_QUEUE_MAX = max(1, int(os.getenv("LLM_JOB_QUEUE_MAX", "200")))
 LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", "4")))
 LLM_ALLOWED_USERS_SQL = os.getenv(
     "LLM_ALLOWED_USERS_SQL",
-    "SELECT SSO_ID FROM SCM_WP.T_T_FOR_MASTER A WHERE 1=1 AND a.sso_id = 'sungmook.cho' AND A.DEPT_NAME LIKE '%SCM%메모리%' and a.POSITION_CODE is not null AND A.SSO_ID NOT IN ('SCM.RPA','SCM 봇','메모리STO2','메모리 STO','dalbong.chatbot01', 'dalbongbot01', 'dalbong.bot01', 'command.center', 'thatcoolguy')"
+    "SELECT SSO_ID FROM SCM_WP.T_T_FOR_MASTER A WHERE 1=1 AND a.sso_id in ('hy73.park','cheon.kim','suy.kim','kyungchan.seong','jh3.park','junsoo.jung','jjlive.kim','jc2573.lee','hs1979.kim','sunok78.han','sungmook.cho','hsung.chae','sj82.han','w2635.lee','sung.w.jung') AND A.DEPT_NAME LIKE '%메모리%' and a.POSITION_CODE is not null AND A.SSO_ID NOT IN ('SCM.RPA','SCM 봇','메모리STO2','메모리 STO','dalbong.chatbot01', 'dalbongbot01', 'dalbong.bot01', 'command.center', 'thatcoolguy')"
 )
 LLM_ALLOWED_USERS_CACHE_TTL_SEC = max(0, int(os.getenv("LLM_ALLOWED_USERS_CACHE_TTL_SEC", "300")))
 
@@ -710,28 +720,81 @@ def _get_month_range(year: int, month: int) -> Optional[Tuple[datetime, datetime
 
 
 def _extract_time_range_from_question(question: str) -> Optional[Dict[str, Any]]:
-    q_raw = (question or "")
-    q = q_raw.replace(" ", "")
-    if not q:
+    import re
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    q_raw = (question or "").strip()
+    if not q_raw:
         return None
 
+    # 공백 제거 버전(토큰 탐지용) / 원문(정규식용)
+    q_compact = q_raw.replace(" ", "")
     now = datetime.now(ZoneInfo("Asia/Seoul"))
 
-    if any(token in q for token in ("이번주", "금주", "이번주간")):
+    def _mk(label: str, start: datetime, end: datetime) -> Dict[str, Any]:
+        # end는 "포함"으로 쓰는 게 편하니, 23:59:59로 세팅(필요시 너희 RAG filter 형식에 맞춰 조정)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+        return {
+            "label": f"{label}({start.strftime('%Y-%m-%d')}~{end.strftime('%Y-%m-%d')})",
+            "start": start,
+            "end": end,
+        }
+
+    # 0) (옵션) YYYY-MM-DD ~ YYYY-MM-DD 같은 "명시 범위"가 있으면 최우선
+    m = re.search(r"(\d{4})[-./](\d{1,2})[-./](\d{1,2})\s*[~\-]\s*(\d{4})[-./](\d{1,2})[-./](\d{1,2})", q_raw)
+    if m:
+        y1, mo1, d1, y2, mo2, d2 = map(int, m.groups())
+        start = datetime(y1, mo1, d1, 0, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+        end = datetime(y2, mo2, d2, 23, 59, 59, tzinfo=ZoneInfo("Asia/Seoul"))
+        if start <= end:
+            return _mk("지정기간", start, end)
+
+    # 1) YYYY년 MM월 / 올해/작년 MM월 (최우선: 명시 월)
+    m = re.search(r"(\d{4})\s*년\s*(\d{1,2})\s*월", q_raw)
+    if m:
+        target_year = int(m.group(1))
+        target_month = int(m.group(2))
+        month_range = _get_month_range(target_year, target_month)
+        if month_range:
+            start, end = month_range
+            return _mk(f"{target_year}년 {target_month}월", start, end)
+
+    m = re.search(r"작년\s*(\d{1,2})\s*월", q_raw)
+    if m:
+        target_month = int(m.group(1))
+        month_range = _get_month_range(now.year - 1, target_month)
+        if month_range:
+            start, end = month_range
+            return _mk(f"작년 {target_month}월", start, end)
+
+    m = re.search(r"(올해|금년|당해)\s*(\d{1,2})\s*월", q_raw)
+    if m:
+        target_month = int(m.group(2))
+        month_range = _get_month_range(now.year, target_month)
+        if month_range:
+            start, end = month_range
+            return _mk(f"올해 {target_month}월", start, end)
+
+    # 2) 이번주/저번주/이번달/저번달 (캘린더 기간)
+    if any(token in q_compact for token in ("이번주", "금주", "이번주간")):
         start, end = _get_week_range(now, week_offset=0)
-        return {"label": "이번주", "start": start, "end": end}
+        return _mk("이번주", start, end)
 
-    if any(token in q for token in ("저번주", "지난주", "전주", "지난주간")):
+    if any(token in q_compact for token in ("저번주", "지난주", "전주", "지난주간")):
         start, end = _get_week_range(now, week_offset=-1)
-        return {"label": "저번주", "start": start, "end": end}
+        return _mk("저번주", start, end)
 
-    if "이번달" in q or "금월" in q:
+    if any(token in q_compact for token in ("이번달", "금월")):
         month_range = _get_month_range(now.year, now.month)
         if month_range:
             start, end = month_range
-            return {"label": "이번달", "start": start, "end": end}
+            return _mk("이번달", start, end)
 
-    if "저번달" in q or "지난달" in q or "전월" in q:
+    if any(token in q_compact for token in ("저번달", "지난달", "전월")):
         year = now.year
         month = now.month - 1
         if month == 0:
@@ -740,32 +803,48 @@ def _extract_time_range_from_question(question: str) -> Optional[Dict[str, Any]]
         month_range = _get_month_range(year, month)
         if month_range:
             start, end = month_range
-            return {"label": "저번달", "start": start, "end": end}
+            return _mk("저번달", start, end)
 
-    m = re.search(r"작년\s*(\d{1,2})\s*월", q_raw)
-    if m:
-        target_month = int(m.group(1))
-        month_range = _get_month_range(now.year - 1, target_month)
-        if month_range:
-            start, end = month_range
-            return {"label": f"작년 {target_month}월", "start": start, "end": end}
+    # 3) "최근 N일/최근 N주/최근 N개월" (rolling window)
+    #    - 숫자 없이 "최근/요즘/근래/최근에"만 있으면 default 7일
+    recent_tokens = ("최근", "요즘", "근래", "최근에")
+    if any(tok in q_compact for tok in recent_tokens):
+        # 예: 최근3일 / 최근 2주 / 최근 한달 / 요즘(=default)
+        # 숫자: 1~3자리, 단위: 일/주/주일/개월/달
+        m = re.search(r"(최근|요즘|근래|최근에)\s*(\d{1,3})?\s*(일|주|주일|개월|달)?", q_raw)
+        n = None
+        unit = None
+        if m:
+            if m.group(2):
+                try:
+                    n = int(m.group(2))
+                except:
+                    n = None
+            unit = (m.group(3) or "").strip()
 
-    m = re.search(r"(올해|금년|당해)\s*(\d{1,2})\s*월", q_raw)
-    if m:
-        target_month = int(m.group(2))
-        month_range = _get_month_range(now.year, target_month)
-        if month_range:
-            start, end = month_range
-            return {"label": f"올해 {target_month}월", "start": start, "end": end}
+        # 기본값
+        if n is None:
+            n = 7
+        if not unit:
+            unit = "일"
 
-    m = re.search(r"(\d{4})\s*년\s*(\d{1,2})\s*월", q_raw)
-    if m:
-        target_year = int(m.group(1))
-        target_month = int(m.group(2))
-        month_range = _get_month_range(target_year, target_month)
-        if month_range:
-            start, end = month_range
-            return {"label": f"{target_year}년 {target_month}월", "start": start, "end": end}
+        unit = unit.replace("주일", "주")
+        unit = unit.replace("달", "개월")
+
+        if unit == "일":
+            delta = timedelta(days=n)
+            label = f"최근 {n}일"
+        elif unit == "주":
+            delta = timedelta(days=7 * n)
+            label = f"최근 {n}주"
+        else:  # "개월"
+            # 월은 정확한 일수로 환산이 애매해서 실무적으로 30일*n로 rolling 처리(캘린더월은 '이번달/저번달'로 이미 커버)
+            delta = timedelta(days=30 * n)
+            label = f"최근 {n}개월"
+
+        end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+        start = (end - delta).replace(hour=0, minute=0, second=0, microsecond=0)
+        return _mk(label, start, end)
 
     return None
 
@@ -899,7 +978,99 @@ def is_rag_result_relevant(question: str, top_docs: List[Dict[str, Any]]) -> boo
         return False
 
     return True
+
+# =========================
+# Glossary RAG Helper Functions
+# =========================
+def is_glossary_doc(doc: Dict[str, Any]) -> bool:
+    """문서가 glossary 인덱스에서 온 것인지 확인"""
+    return doc.get("_index", "") == GLOSSARY_INDEX_NAME
+
+def is_glossary_intent(question: str) -> bool:
+    """
+    용어형 질문인지 판별
+    - 포함 키워드: 뜻, 의미, 정의, 약자, 무슨, 뭐야, 용어, 무슨뜻
+    - 정규식: 영문 대문자 약어 (2~6자)
+    - 패턴: 란, ~이란
+    - 단, 메일성 요약 의도(이번주/저번주/정리/이슈)가 있으면 False
+    """
+    q = (question or "").strip()
+    if not q:
+        return False
     
+    # 메일성 요약 의도가 강하면 False (메일 RAG 유지)
+    mail_intent_keywords = ["이번주", "저번주", "지난주", "정리", "이슈"]
+    q_compact = q.replace(" ", "")
+    if any(kw in q_compact for kw in mail_intent_keywords):
+        return False
+    
+    # 용어형 질문 키워드
+    glossary_keywords = ["뜻", "의미", "정의", "약자", "무슨", "뭐야", "용어", "무슨뜻"]
+    if any(kw in q for kw in glossary_keywords):
+        return True
+    
+    # 영문 대문자 약어 패턴 (2~6자)
+    if re.search(r"\b[A-Z]{2,6}\b", q):
+        return True
+    
+    # "~란", "~이란" 패턴
+    if re.search(r".?란\s*$", q) or re.search(r".?이란\s*$", q):
+        return True
+    
+    return False
+
+def is_glossary_result_relevant(
+    question: str,
+    docs: List[Dict[str, Any]],
+    *,
+    topk: int = 3,
+    min_score: float = 0.38
+) -> bool:
+    """
+    glossary 문서들에 대한 완화된 관련성 판정
+    - topK 중 하나라도 키워드/약어가 매칭되면 True
+    - 점수 조건은 완화 (min_score)
+    """
+    if not docs:
+        return False
+    
+    # glossary 문서만 필터
+    gdocs = [d for d in docs if is_glossary_doc(d)]
+    if not gdocs:
+        return False
+    
+    # 상위 topk 대상으로 검사
+    target_docs = gdocs[:topk]
+    
+    # 질문에서 키워드 추출
+    keywords = _extract_query_keywords(question)
+    
+    # 약어 추출 (영문 대문자 2~8자)
+    abbreviations = re.findall(r"\b[A-Z]{2,8}\b", question)
+    
+    # 각 문서에 대해 키워드/약어 매칭 확인
+    for doc in target_docs:
+        title = str(doc.get("title") or "")
+        content = str(doc.get("content") or doc.get("merge_title_content") or "")
+        haystack = _normalize_text_for_match(title + " " + content)
+        
+        # 키워드 매칭 확인
+        keyword_hits = sum(1 for kw in keywords if kw in haystack)
+        if keyword_hits >= 1:
+            return True
+        
+        # 약어 매칭 확인
+        for abbr in abbreviations:
+            if abbr in haystack:
+                return True
+        
+        # 점수 조건 (완화된 threshold)
+        combined_score = float(doc.get("_combined_score") or 0.0)
+        if combined_score >= min_score:
+            return True
+    
+    return False
+
 def format_rag_context(documents: List[Dict[str, Any]], max_docs: int = 3) -> str:
     if not documents:
         return ""
@@ -1157,29 +1328,87 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         reranked_docs = rerank_rag_documents(all_rag_documents)[:RAG_NUM_RESULT_DOC]
         top_docs = reranked_docs[:RAG_CONTEXT_DOCS]
 
-        top_score = float(top_docs[0].get("_combined_score") or 0.0) if top_docs else 0.0
-        skip_rag = top_score < RAG_SIMILARITY_THRESHOLD
-        rag_relevant = (not skip_rag) and is_rag_result_relevant(question, top_docs)
-        rag_context = format_rag_context(top_docs, max_docs=RAG_CONTEXT_DOCS) if rag_relevant else ""
+        # =========================
+        # 메일 우선 + Glossary 완화 로직
+        # =========================
+        # 문서 분리
+        mail_docs = [d for d in top_docs if d.get("_index") == MAIL_INDEX_NAME]
+        glossary_docs = [d for d in top_docs if d.get("_index") == GLOSSARY_INDEX_NAME]
+
+        # 로깅용 변수
+        selected_rag_domain = "none"
+        glossary_intent = False
+        glossary_match = False
+        mail_match = False
+
+        # 1) 메일 우선: 메일 문서가 있고 관련성이 높으면 메일 RAG 사용
+        if mail_docs and is_rag_result_relevant(question, mail_docs):
+            selected_rag_domain = "mail"
+            mail_match = True
+            rag_relevant = True
+            rag_context = format_rag_context(mail_docs, max_docs=RAG_CONTEXT_DOCS)
+        # 2) 용어형 질문이고 glossary 문서가 있으면 완화된 기준으로 glossary RAG 사용
+        elif GLOSSARY_RAG_ENABLE and is_glossary_intent(question) and glossary_docs:
+            selected_rag_domain = "glossary"
+            glossary_intent = True
+            glossary_match = is_glossary_result_relevant(
+                question,
+                glossary_docs,
+                topk=GLOSSARY_TOPK_MATCH,
+                min_score=GLOSSARY_RELAXED_THRESHOLD
+            )
+            rag_relevant = glossary_match
+            rag_context = format_rag_context(glossary_docs, max_docs=RAG_CONTEXT_DOCS) if glossary_match else ""
+        # 3) 기존 로직 유지 (fallback)
+        else:
+            top_score = float(top_docs[0].get("_combined_score") or 0.0) if top_docs else 0.0
+            skip_rag = top_score < RAG_SIMILARITY_THRESHOLD
+            rag_relevant = (not skip_rag) and is_rag_result_relevant(question, top_docs)
+            rag_context = format_rag_context(top_docs, max_docs=RAG_CONTEXT_DOCS) if rag_relevant else ""
+
+        # 로그 출력
+        print(f"[RAG Domain Selection] selected_rag_domain={selected_rag_domain}, "
+              f"glossary_intent={glossary_intent}, glossary_match={glossary_match}, mail_match={mail_match}")
 
         if rag_context and rag_relevant:
             from langchain_core.messages import SystemMessage, HumanMessage
             stats["used_rag"] = True
 
             system_prompt = f"""
-            당신은 GOC 업무 지원 챗봇입니다.
-            반드시 아래 검색 문서를 최우선 근거로 사용하여 답변하세요.
+                당신은 GOC 업무 지원 챗봇입니다.
 
-            [검색 문서]
-            {rag_context}
+                최우선 규칙
+                1) 아래 [검색 문서]에 있는 내용만을 근거로 "📂 문서 기반 답변"을 작성하세요. (추측/일반상식/외부지식 금지)
+                2) 문서에 없는 내용은 반드시 "문서에 해당 정보가 없습니다."라고 명시하세요.
+                3) 질문에 기간(이번주/저번주/지난주/오늘/어제/최근N일)이 포함되면, 답변 첫 줄 또는 요약에 적용한 기간을 반드시 명시하세요.
+                4) 질문에 기간 지정이 없으면, 검색 문서 중 "가장 최신 문서일시"를 기준으로 답변하고, 그 기준 문서일시를 명시하세요.
+                5) 문서 간 내용이 다르면 가장 최신 문서를 우선하고, "문서 간 상충"이라고 표시하세요.
+                6) "💡 AI 의견"은 참고용 보충설명만 가능하며, 문서 사실처럼 단정하지 마세요. 문서와 충돌하면 문서가 항상 우선입니다.
 
-            답변 형식
-            📌 한줄 요약
-            📂 문서 기반 답변
-            💡 AI 의견
-            📂 근거 문서
-            ⚠️ 주의         
-            🔗 이슈지 바로가기 👉 "https://go/이슈지"
+                [검색 문서]
+                {rag_context}
+
+                출력 형식(아래 순서/제목을 반드시 그대로 유지)
+                📌 한줄 요약
+                - (기간/기준일시 포함 1문장)
+
+                📂 문서 기반 답변
+                - 핵심 사실 2~5개 (각 항목에 가능한 경우 날짜/수량/조직/대상 포함)
+                - 문서에 없는 부분은 "문서에 해당 정보가 없습니다."로 표시
+
+                💡 AI 의견
+                - (참고용) 해석/실무적 의미 1~3개
+                - 단정 금지(“~일 수 있습니다/권장합니다/확인 필요”)
+
+                📂 근거 문서
+                - 1) {'문서명'} | {'문서일시'} | {'근거한줄'} | {'링크'}
+                - 2) ...
+                (최대 3개)
+
+                ⚠️ 주의
+                - "📂 문서 기반 답변"은 문서에 있는 사실만, "💡 AI 의견"은 참고용입니다.
+
+                🔗 이슈지 바로가기 👉 https://go/issueG
             """
 
             messages = [SystemMessage(content=system_prompt), HumanMessage(content=question)]
@@ -2168,7 +2397,6 @@ def dashboard(token: str | None = Query(default=None)):
     if not DASHBOARD_TOKEN:
         t = token or ""
         return HTMLResponse(ui.DASHBOARD_HTML.replace("__DASHBOARD_TITLE__", DASHBOARD_TITLE).replace("__TOKEN__", t))
-
     if (token or "") == DASHBOARD_TOKEN:
         return HTMLResponse(ui.DASHBOARD_HTML.replace("__DASHBOARD_TITLE__", DASHBOARD_TITLE).replace("__TOKEN__", token or ""))
 
@@ -2580,4 +2808,4 @@ async def post_message(request: Request):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=BIND_HOST, port=BIND_PORT, workers=1)
+    uvicorn.run(app, host=BIND_HOST, port=BIND_PORT, workers=1)                

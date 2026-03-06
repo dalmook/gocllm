@@ -88,6 +88,7 @@ MEMORY_SUMMARIZE_ASSISTANT = os.getenv("MEMORY_SUMMARIZE_ASSISTANT", "true").low
 MEMORY_ONLY_SINGLE = os.getenv("MEMORY_ONLY_SINGLE", "true").lower() == "true"
 MEMORY_RESET_COMMANDS = [x.strip() for x in os.getenv("MEMORY_RESET_COMMANDS", "/reset,기억초기화,대화초기화").split(",") if x.strip()]
 MEMORY_DB_PATH = os.getenv("MEMORY_DB_PATH", "")
+ENABLE_CONVERSATION_STATE = os.getenv("ENABLE_CONVERSATION_STATE", "true").lower() == "true"
 
 # =========================
 # LLM API Configuration (GaussO4)
@@ -1240,7 +1241,7 @@ def _memory_db_path() -> str:
 
 
 def init_conversation_memory_db():
-    if not ENABLE_CONVERSATION_MEMORY:
+    if not (ENABLE_CONVERSATION_MEMORY or ENABLE_CONVERSATION_STATE):
         return
     with sqlite3.connect(_memory_db_path()) as conn:
         conn.execute(
@@ -1257,6 +1258,18 @@ def init_conversation_memory_db():
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_memory_scope_id_id ON chat_memory(scope_id, id)")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_context_state (
+                scope_id TEXT PRIMARY KEY,
+                topic TEXT,
+                time_label TEXT,
+                last_query TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            )
+            """
+        )
         conn.commit()
 
 
@@ -1328,6 +1341,92 @@ def clear_conversation_memory(scope_id: str):
     with sqlite3.connect(_memory_db_path()) as conn:
         conn.execute("DELETE FROM chat_memory WHERE scope_id = ?", (str(scope_id),))
         conn.commit()
+
+
+def load_conversation_state(scope_id: str) -> Dict[str, str]:
+    if not ENABLE_CONVERSATION_STATE:
+        return {}
+    with sqlite3.connect(_memory_db_path()) as conn:
+        row = conn.execute(
+            "SELECT topic, time_label, last_query FROM chat_context_state WHERE scope_id = ?",
+            (str(scope_id),),
+        ).fetchone()
+    if not row:
+        return {}
+    return {
+        "topic": (row[0] or "").strip(),
+        "time_label": (row[1] or "").strip(),
+        "last_query": (row[2] or "").strip(),
+    }
+
+
+def save_conversation_state(scope_id: str, *, topic: str = "", time_label: str = "", last_query: str = ""):
+    if not ENABLE_CONVERSATION_STATE:
+        return
+    with sqlite3.connect(_memory_db_path()) as conn:
+        conn.execute(
+            """
+            INSERT INTO chat_context_state(scope_id, topic, time_label, last_query, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now', 'localtime'))
+            ON CONFLICT(scope_id) DO UPDATE SET
+                topic=excluded.topic,
+                time_label=excluded.time_label,
+                last_query=excluded.last_query,
+                updated_at=datetime('now', 'localtime')
+            """,
+            (str(scope_id), (topic or "").strip(), (time_label or "").strip(), (last_query or "").strip()),
+        )
+        conn.commit()
+
+
+def _extract_topic_from_question(question: str) -> str:
+    q = normalize_query_for_search(question)
+    if not q:
+        return ""
+    stop = {
+        "이슈", "정리", "요약", "현황", "최근", "최신", "이번주", "지난주", "저번주", "사항", "알려줘", "해줘", "뭐야", "그거", "저기", "그중"
+    }
+    toks = [t for t in q.split() if len(t) >= 2 and t not in stop]
+    if not toks:
+        return ""
+    # 영어 대문자 토큰(HBM/FLASH 등)을 우선
+    for t in toks:
+        if re.fullmatch(r"[A-Z0-9_\-]{2,20}", t):
+            return t
+    return toks[0]
+
+
+def _extract_time_label_from_question(question: str, time_range: Optional[Dict[str, Any]]) -> str:
+    if time_range and time_range.get("label"):
+        return str(time_range.get("label")).split("(")[0].strip()
+    q = re.sub(r"\s+", "", question or "")
+    if any(k in q for k in ("이번주", "금주")):
+        return "이번주"
+    if any(k in q for k in ("지난주", "저번주", "전주")):
+        return "지난주"
+    if any(k in q for k in ("최근", "최신", "요즘", "근래")):
+        return "최근"
+    return ""
+
+
+def _build_effective_question(question: str, *, scope_id: str, time_range: Optional[Dict[str, Any]]) -> Tuple[str, Dict[str, str]]:
+    state = load_conversation_state(scope_id)
+    q = (question or "").strip()
+    topic_now = _extract_topic_from_question(q)
+    time_now = _extract_time_label_from_question(q, time_range)
+
+    use_state = _is_context_dependent_question(q) or any(x in q for x in ("그거", "저기", "그중", "방금", "아까"))
+    topic_eff = topic_now or (state.get("topic", "") if use_state else "")
+    time_eff = time_now or (state.get("time_label", "") if use_state else "")
+
+    prefix_parts = []
+    if topic_eff and not topic_now:
+        prefix_parts.append(f"주제={topic_eff}")
+    if time_eff and not time_now:
+        prefix_parts.append(f"기간={time_eff}")
+
+    effective = q if not prefix_parts else f"[{', '.join(prefix_parts)}] {q}"
+    return effective, {"topic": topic_eff, "time_label": time_eff}
 
 
 def build_memory_text(memory_messages: List[Dict[str, str]]) -> str:
@@ -1646,6 +1745,15 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 content=answer,
                 chat_type=chat_type,
             )
+            try:
+                save_conversation_state(
+                    scope_id,
+                    topic=_extract_topic_from_question(question),
+                    time_label=_extract_time_label_from_question(question, _extract_time_range_from_question(question)),
+                    last_query=question,
+                )
+            except Exception as _e:
+                print(f"[CONTEXT STATE] save failed: {_e}")
             perf["total_ms"] = (time.perf_counter() - perf["t0"]) * 1000
             if LLM_PROFILE_LOG:
                 print(
@@ -1657,23 +1765,25 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 )
             return stats
 
-        normalized_query = normalize_query_for_search(question)
-        glossary_intent = is_glossary_intent(question)
-        force_glossary = is_force_glossary_query(question)
+        time_range = _extract_time_range_from_question(question)
+        effective_question, ctx_state = _build_effective_question(question, scope_id=scope_id, time_range=time_range)
+
+        normalized_query = normalize_query_for_search(effective_question)
+        glossary_intent = is_glossary_intent(effective_question)
+        force_glossary = is_force_glossary_query(effective_question)
         print(f"[RAG] original question={question}")
+        print(f"[RAG] effective question={effective_question}")
         print(f"[RAG] normalized query={normalized_query}")
         print(f"[RAG] glossary_intent={glossary_intent}")
         print(f"[RAG] force_glossary={force_glossary}")
 
         t_rewrite = time.perf_counter()
-        search_queries = build_search_queries(question, llm, memory_text=memory_text, use_memory_for_rewrite=use_memory_for_rewrite)
+        search_queries = build_search_queries(effective_question, llm, memory_text=memory_text, use_memory_for_rewrite=use_memory_for_rewrite)
         perf["rewrite_ms"] = (time.perf_counter() - t_rewrite) * 1000
         print(f"[RAG] search queries: {search_queries}")
-
-        time_range = _extract_time_range_from_question(question)
-        issue_summary_intent = is_issue_summary_intent(question)
-        strong_mail_intent = has_strong_mail_intent(question)
-        prefer_recent_docs = bool(time_range) or should_prioritize_recent_docs(question) or issue_summary_intent
+        issue_summary_intent = is_issue_summary_intent(effective_question)
+        strong_mail_intent = has_strong_mail_intent(effective_question)
+        prefer_recent_docs = bool(time_range) or should_prioritize_recent_docs(effective_question) or issue_summary_intent
         retrieve_top_k = RAG_NUM_RESULT_DOC
         if time_range:
             retrieve_top_k = max(RAG_NUM_RESULT_DOC, RAG_TEMPORAL_NUM_RESULT_DOC)
@@ -1754,7 +1864,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 
         if GLOSSARY_RAG_ENABLE and force_glossary and glossary_docs:
             glossary_match = is_glossary_result_relevant(
-                question,
+                effective_question,
                 glossary_docs,
                 topk=GLOSSARY_TOPK_MATCH,
                 min_score=GLOSSARY_THRESHOLD,
@@ -1764,13 +1874,13 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 rag_relevant = True
                 selected_docs = glossary_docs[:RAG_CONTEXT_DOCS]
                 rag_context = format_rag_context(selected_docs, max_docs=RAG_CONTEXT_DOCS)
-            elif mail_docs and is_rag_result_relevant(question, mail_docs):
+            elif mail_docs and is_rag_result_relevant(effective_question, mail_docs):
                 selected_rag_domain = "mail"
                 mail_match = True
                 rag_relevant = True
                 selected_docs = mail_docs
                 rag_context = format_rag_context(mail_docs, max_docs=RAG_CONTEXT_DOCS)
-        elif mail_docs and is_rag_result_relevant(question, mail_docs):
+        elif mail_docs and is_rag_result_relevant(effective_question, mail_docs):
             selected_rag_domain = "mail"
             mail_match = True
             rag_relevant = True
@@ -1778,7 +1888,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             rag_context = format_rag_context(mail_docs, max_docs=RAG_CONTEXT_DOCS)
         elif GLOSSARY_RAG_ENABLE and glossary_intent and glossary_docs:
             glossary_match = is_glossary_result_relevant(
-                question,
+                effective_question,
                 glossary_docs,
                 topk=GLOSSARY_TOPK_MATCH,
                 min_score=GLOSSARY_THRESHOLD,
@@ -1793,7 +1903,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             top_docs = combined_docs[:RAG_CONTEXT_DOCS]
             top_score = float(top_docs[0].get("_combined_score") or 0.0) if top_docs else 0.0
             skip_rag = top_score < RAG_SIMILARITY_THRESHOLD
-            rag_relevant = (not skip_rag) and is_rag_result_relevant(question, top_docs)
+            rag_relevant = (not skip_rag) and is_rag_result_relevant(effective_question, top_docs)
             if rag_relevant:
                 selected_docs = top_docs
                 rag_context = format_rag_context(top_docs, max_docs=RAG_CONTEXT_DOCS)
@@ -1935,6 +2045,16 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             content=answer,
             chat_type=chat_type,
         )
+        # 대화 맥락(state) 업데이트: 후속 질문에서 주제/기간 보완에 활용
+        try:
+            save_conversation_state(
+                scope_id,
+                topic=ctx_state.get("topic", ""),
+                time_label=ctx_state.get("time_label", ""),
+                last_query=effective_question,
+            )
+        except Exception as _e:
+            print(f"[CONTEXT STATE] save failed: {_e}")
         perf["total_ms"] = (time.perf_counter() - perf["t0"]) * 1000
         if LLM_PROFILE_LOG:
             print(

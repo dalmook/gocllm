@@ -1,7 +1,7 @@
 id: psi_sales_by_month
 description: "특정 월/버전 판매량 합계"
 sql: |
-  SELECT SUM(FBIQTY) AS sales
+  SELECT SUM(SALES_MEQ) AS sales
   FROM mst_psi_simul_report
   WHERE VERSION = :version
     AND YEARMONTH = :yearmonth

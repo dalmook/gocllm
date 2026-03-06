@@ -5,10 +5,13 @@ Quick test chatbot: question -> Oracle SQL -> LLM answer
 Example:
   python sql_llm_test.py --question "2월 WC 버전 판매 몇개야"
 
-Env required:
-  ORACLE_USER
-  ORACLE_PASSWORD
-  ORACLE_DSN
+DB env (optional if you use same defaults as gocllm.py):
+  ORACLE_HOST (default: gmgsdd09-vip.sec.samsung.net)
+  ORACLE_PORT (default: 2541)
+  ORACLE_SERVICE (default: MEMSCM)
+  ORACLE_USER (default: memscm)
+  ORACLE_PW / ORACLE_PASSWORD (default: mem01scm)
+  ORACLE_DSN (optional: if set, used directly)
 
 LLM env (same style as gocllm):
   LLM_PROVIDER_PROFILE=gauss|gpt_oss
@@ -133,14 +136,15 @@ def build_sql(month: str | None, version_like: str | None):
 
 
 def query_db(sql: str, binds: Dict[str, Any]) -> List[Dict[str, Any]]:
-    user = os.getenv("ORACLE_USER")
-    pwd = os.getenv("ORACLE_PASSWORD")
-    dsn = os.getenv("ORACLE_DSN")
+    # same default style as gocllm.py (for quick local test)
+    host = os.getenv("ORACLE_HOST", "gmgsdd09-vip.sec.samsung.net")
+    port = int(os.getenv("ORACLE_PORT", "2541"))
+    service = os.getenv("ORACLE_SERVICE", "MEMSCM")
+    user = os.getenv("ORACLE_USER", "memscm")
+    pwd = os.getenv("ORACLE_PW", os.getenv("ORACLE_PASSWORD", "mem01scm"))
+    dsn = os.getenv("ORACLE_DSN") or cx_Oracle.makedsn(host, port, service_name=service)
 
-    if not (user and pwd and dsn):
-        raise RuntimeError("Missing ORACLE_USER / ORACLE_PASSWORD / ORACLE_DSN")
-
-    with cx_Oracle.connect(user=user, password=pwd, dsn=dsn) as conn:
+    with cx_Oracle.connect(user=user, password=pwd, dsn=dsn, encoding="UTF-8") as conn:
         with conn.cursor() as cur:
             cur.execute(sql, binds)
             rows = cur.fetchall()

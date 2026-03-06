@@ -39,18 +39,17 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List
 
-import cx_Oracle
+import oracledb
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 
 BASE_SQL = """
-select yearmonth, version, sum(sales_meq) 판매
+select yearmonth, version, sum(sales_meq) as sales
 from mst_psi_simul_report
 where workdate = to_char(sysdate,'yyyymmdd')
   and p_module = 'PMIX'
   and s_module = 'SOKBO'
-group by yearmonth, version
 """.strip()
 
 
@@ -123,6 +122,7 @@ def build_sql(month: str | None, version_like: str | None):
     sql = BASE_SQL
     binds = {}
 
+    # yearmonth is text like '202603'
     if month:
         sql += "\n  and substr(yearmonth, 5, 2) = :p_month"
         binds["p_month"] = month
@@ -131,6 +131,7 @@ def build_sql(month: str | None, version_like: str | None):
         sql += "\n  and upper(version) like :p_version"
         binds["p_version"] = f"%{version_like}%"
 
+    sql += "\ngroup by yearmonth, version"
     sql += "\norder by yearmonth, version"
     return sql, binds
 
@@ -142,9 +143,9 @@ def query_db(sql: str, binds: Dict[str, Any]) -> List[Dict[str, Any]]:
     service = os.getenv("ORACLE_SERVICE", "MEMSCM")
     user = os.getenv("ORACLE_USER", "memscm")
     pwd = os.getenv("ORACLE_PW", os.getenv("ORACLE_PASSWORD", "mem01scm"))
-    dsn = os.getenv("ORACLE_DSN") or cx_Oracle.makedsn(host, port, service_name=service)
+    dsn = os.getenv("ORACLE_DSN") or oracledb.makedsn(host, port, service_name=service)
 
-    with cx_Oracle.connect(user=user, password=pwd, dsn=dsn, encoding="UTF-8") as conn:
+    with oracledb.connect(user=user, password=pwd, dsn=dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(sql, binds)
             rows = cur.fetchall()

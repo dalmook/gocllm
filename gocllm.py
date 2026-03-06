@@ -91,14 +91,24 @@ MEMORY_DB_PATH = os.getenv("MEMORY_DB_PATH", "")
 ENABLE_CONVERSATION_STATE = os.getenv("ENABLE_CONVERSATION_STATE", "true").lower() == "true"
 
 # =========================
-# LLM API Configuration (GaussO4)
+# LLM API Configuration
 # =========================
-# 테스트 키 (운영 키로 변경하려면 아래 값만 수정)
+# profile: gauss | gpt_oss
+LLM_PROVIDER_PROFILE = os.getenv("LLM_PROVIDER_PROFILE", "gauss").strip().lower()
+
+# GaussO4 profile
 LLM_API_KEY = os.getenv("LLM_API_KEY", "credential:TICKET-96f7bce0-efab-4516-8e62-5501b07ab43c:ST0000107488-PROD:CTXLCkSDRGWtI5HdVHkPAQgol2o-RyQiq2I1vCHHOgGw:-1:Q1RYTENrU0RSR1d0STVIZFZIa1BBUWdvbDJvLVJ5UWlxMkkxdkNISE9nR3c=:signature=eRa1UcfmWGfKTDBt-Xnz2wFhW0OvMX0WESZUpoNVgCA5uNVgpgax59LZ3osPOp8whnZwQay8s5TUvxJGtmsCD9iK-HpcsyUOcE5P58W0Weyg-YQ3KRTWFiA==")
 LLM_API_URL = os.getenv("LLM_API_URL", "http://apigw.samsungds.net:8000/model-23/1/gausso4-instruct/v1")
 LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "GaussO4-instruct")
 LLM_SEND_SYSTEM_NAME = os.getenv("LLM_SEND_SYSTEM_NAME", "GOC_MAIL_RAG_PIPELINE")
 LLM_USER_TYPE = os.getenv("LLM_USER_TYPE", "bot")
+
+# GPT-OSS profile (from gpt_oss_api.md spec)
+GPT_OSS_API_KEY = os.getenv("GPT_OSS_API_KEY", "")
+GPT_OSS_API_URL = os.getenv("GPT_OSS_API_URL", "http://apigw-stg.samsungds.net:8000/gpt-oss/1/gpt-oss-120b/v1")
+GPT_OSS_MODEL_NAME = os.getenv("GPT_OSS_MODEL_NAME", "openai/gpt-oss-120b")
+GPT_OSS_SEND_SYSTEM_NAME = os.getenv("GPT_OSS_SEND_SYSTEM_NAME", LLM_SEND_SYSTEM_NAME)
+GPT_OSS_USER_TYPE = os.getenv("GPT_OSS_USER_TYPE", "AD_ID")
 
 # =========================
 # RAG API Configuration
@@ -438,30 +448,57 @@ class KnoxMessenger:
 
 
 # =========================
-# LLM Chatbot (GaussO4)
+# LLM Chatbot
 # =========================
 # LangChain ChatOpenAI에서 필요한 더미 키
 os.environ["OPENAI_API_KEY"] = "api_key"
 
-def create_llm_chatbot(user_id: str = "bot"):
-    """GaussO4 LLM 챗봇 인스턴스 생성"""
-    headers = {
-        "x-dep-ticket": LLM_API_KEY,
-        "Send-System-Name": LLM_SEND_SYSTEM_NAME,
-        "User-Id": user_id,
-        "User-Type": LLM_USER_TYPE,
-        "Prompt-Msg-Id": str(uuid.uuid4()),
-        "Completion-Msg-Id": str(uuid.uuid4()),
+def _llm_profile_config(user_id: str) -> Dict[str, Any]:
+    profile = (LLM_PROVIDER_PROFILE or "gauss").lower()
+    if profile == "gpt_oss":
+        api_key = GPT_OSS_API_KEY or LLM_API_KEY
+        return {
+            "profile": "gpt_oss",
+            "base_url": GPT_OSS_API_URL,
+            "model": GPT_OSS_MODEL_NAME,
+            "headers": {
+                "x-dep-ticket": api_key,
+                "Send-System-Name": GPT_OSS_SEND_SYSTEM_NAME,
+                "User-Id": user_id,
+                "User-Type": GPT_OSS_USER_TYPE,
+                "Prompt-Msg-Id": str(uuid.uuid4()),
+                "Completion-Msg-Id": str(uuid.uuid4()),
+            },
+        }
+
+    return {
+        "profile": "gauss",
+        "base_url": LLM_API_URL,
+        "model": LLM_MODEL_NAME,
+        "headers": {
+            "x-dep-ticket": LLM_API_KEY,
+            "Send-System-Name": LLM_SEND_SYSTEM_NAME,
+            "User-Id": user_id,
+            "User-Type": LLM_USER_TYPE,
+            "Prompt-Msg-Id": str(uuid.uuid4()),
+            "Completion-Msg-Id": str(uuid.uuid4()),
+        },
     }
-    
+
+
+def create_llm_chatbot(user_id: str = "bot"):
+    """Selected profile(gauss/gpt_oss) LLM 챗봇 인스턴스 생성"""
+    cfg = _llm_profile_config(user_id)
+    print(f"[LLM PROFILE] active={cfg.get('profile')} model={cfg.get('model')} base={cfg.get('base_url')}")
+
     llm = ChatOpenAI(
-        base_url=LLM_API_URL,
-        model=LLM_MODEL_NAME,
+        base_url=cfg["base_url"],
+        model=cfg["model"],
         max_tokens=2000,
         temperature=0.3,
-        default_headers=headers
+        default_headers=cfg["headers"],
     )
-    
+
     return llm
 def _is_retryable_llm_error(e: Exception) -> bool:
     s = str(e)

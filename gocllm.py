@@ -140,6 +140,7 @@ LLM_WORKERS = max(1, int(os.getenv("LLM_WORKERS", os.getenv("LLM_WORKER_COUNT", 
 LLM_JOB_QUEUE_MAX = max(1, int(os.getenv("LLM_JOB_QUEUE_MAX", "200")))
 LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", "4")))
 LLM_PROFILE_LOG = os.getenv("LLM_PROFILE_LOG", "true").lower() == "true"
+ISSUE_SUMMARY_SPEED_MODE = os.getenv("ISSUE_SUMMARY_SPEED_MODE", "true").lower() == "true"
 LLM_ALLOWED_USERS_SQL = os.getenv(
     "LLM_ALLOWED_USERS_SQL",
     "SELECT SSO_ID FROM SCM_WP.T_T_FOR_MASTER A WHERE 1=1 AND a.sso_id in ('hy73.park','cheon.kim','suy.kim','kyungchan.seong','jh3.park','junsoo.jung','jjlive.kim','jc2573.lee','hs1979.kim','sunok78.han','sungmook.cho','hsung.chae','sj82.han','w2635.lee','sung.w.jung') AND A.DEPT_NAME LIKE '%메모리%' and a.POSITION_CODE is not null AND A.SSO_ID NOT IN ('SCM.RPA','SCM 봇','메모리STO2','메모리 STO','dalbong.chatbot01', 'dalbongbot01', 'dalbong.bot01', 'command.center', 'thatcoolguy')"
@@ -1806,7 +1807,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             from langchain_core.messages import SystemMessage, HumanMessage
             stats["used_rag"] = True
 
-            if issue_summary_intent:
+            if issue_summary_intent and ISSUE_SUMMARY_SPEED_MODE:
                 system_prompt = f"""
 당신은 GOC 업무 지원 챗봇입니다. 아래 [검색 문서]만 근거로 아주 간결하게 답하세요.
 
@@ -1895,7 +1896,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                     answer += "\n\n📂 근거 문서\n" + "\n".join(source_lines)
 
             # 속도 모드(이슈 요약)에서도 이슈지 바로가기 링크를 항상 하단에 고정 노출
-            if issue_summary_intent and "https://go/issueG" not in answer:
+            if issue_summary_intent and ISSUE_SUMMARY_SPEED_MODE and "https://go/issueG" not in answer:
                 answer += "\n\n🔗 이슈지 바로가기 👉 https://go/issueG"
         else:
             from langchain_core.messages import SystemMessage, HumanMessage

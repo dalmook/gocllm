@@ -648,6 +648,25 @@ def _truncate_text(s: str, max_chars: int = 2200) -> str:
     if len(s) <= max_chars:
         return s
     return s[:max_chars] + " ..."
+
+
+def format_for_knox_text(text: str) -> str:
+    """Convert markdown-ish output to messenger-friendly plain text."""
+    t = (text or "").replace("\r\n", "\n")
+
+    # Headers -> emoji section labels
+    t = re.sub(r"(?m)^###\s*", "📌 ", t)
+    t = re.sub(r"(?m)^##\s*", "📍 ", t)
+    t = re.sub(r"(?m)^#\s*", "📍 ", t)
+
+    # Bold/code markers removal
+    t = t.replace("**", "")
+    t = t.replace("__", "")
+    t = t.replace("`", "")
+
+    # Collapse excessive blank lines
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+    return t
 def _parse_doc_datetime_value(v: Any) -> Optional[datetime]:
     if v in (None, "", 0):
         return None
@@ -1617,7 +1636,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             stats["llm_calls"] += 1
             stats["fallback_reason"] = "prefer_general"
             answer = "📋 문서 기반 답변 미적용\n- 일반 지식/실시간 성격의 질문으로 판단했습니다.\n- 아래는 일반 LLM 답변입니다.\n\n" + response.content.strip()
-            chatBot.send_text(chatroom_id, f"🤖 {answer}")
+            chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
             save_conversation_memory(
                 scope_id=scope_id,
                 room_id=str(chatroom_id),
@@ -1906,7 +1925,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             f"[RAG Final] selected_rag_domain={selected_rag_domain} used_rag={stats['used_rag']} "
             f"fallback_reason={stats.get('fallback_reason','')}"
         )
-        chatBot.send_text(chatroom_id, f"🤖 {answer}")
+        chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
         save_conversation_memory(
             scope_id=scope_id,
             room_id=str(chatroom_id),
